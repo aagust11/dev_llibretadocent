@@ -1,16 +1,18 @@
 import { createStore, DEFAULTS } from './state.js';
 import { getAdapter, DB_NAME, DB_VERSION, STORE_NAME } from './storage.js';
-import { actions } from './actions.js';
+import createActions, { events as actionsEvents } from './actions.js';
 import { initViews, showView } from './views.js';
 import { i18n } from './i18n.js';
-import { debounce } from './utils.js';
+import * as utils from './utils.js';
 
 const store = createStore(DEFAULTS);
 const storageAdapter = getAdapter({ dbName: DB_NAME, storeName: STORE_NAME, version: DB_VERSION });
 
-initViews({ store, actions, i18n, storage: storageAdapter });
+const actions = createActions({ store, storage: storageAdapter, i18n, utils });
 
-actions.init?.({ store, storage: storageAdapter });
+initViews({ store, actions, i18n, storage: storageAdapter, events: actionsEvents });
+
+actions.init?.();
 
 const navButtons = document.querySelectorAll('[data-view]');
 const viewSections = document.querySelectorAll('[id^="view-"]');
@@ -42,7 +44,7 @@ navButtons.forEach((button) => {
   button.addEventListener('click', handleNavigation);
 });
 
-const handleResize = debounce(() => {
+const handleResize = utils.debounce(() => {
   actions.onResize?.(window.innerWidth);
 }, 200);
 
