@@ -454,9 +454,15 @@ async function init() {
   }
 }
 
-document.addEventListener('DOMContentLoaded', () => {
+function boot() {
   init().catch((error) => {
     console.error('Failed to initialise application', error);
     emitUIEvent('app:error', { error });
   });
-});
+}
+
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', boot, { once: true });
+} else {
+  boot();
+}
