@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="ca" class="h-full bg-slate-50">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Llibreta docent</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="/styles/overrides.css" />
+  </head>
+  <body class="h-full font-sans text-slate-900">
+    <a href="#main-content" class="skip-link">Salta al contingut principal</a>
+    <div class="min-h-full lg:flex lg:flex-row">
+      <aside class="bg-slate-900 text-slate-100 w-full lg:w-72 lg:min-h-screen p-6">
+        <div class="mb-8">
+          <h1 class="text-xl font-semibold">Llibreta docent</h1>
+          <p class="text-sm text-slate-300">Gestió de l'aula</p>
+        </div>
+        <nav aria-label="Navegació principal" class="space-y-1">
+          <button type="button" class="sidebar-link is-active" data-view="view-welcome" aria-current="page">Inici</button>
+          <button type="button" class="sidebar-link" data-view="view-assignatures">Assignatures</button>
+          <button type="button" class="sidebar-link" data-view="view-alumnes">Alumnes</button>
+          <button type="button" class="sidebar-link" data-view="view-rubrica">Rúbrica</button>
+          <button type="button" class="sidebar-link" data-view="view-calendari">Calendari</button>
+          <button type="button" class="sidebar-link" data-view="view-fitxa">Fitxa d'alumne</button>
+          <button type="button" class="sidebar-link" data-view="view-exportacions">Exportacions</button>
+          <button type="button" class="sidebar-link" data-view="view-configuracio">Configuració</button>
+        </nav>
+      </aside>
+      <div class="flex-1 flex flex-col">
+        <header class="bg-white border-b border-slate-200">
+          <div class="mx-auto w-full max-w-6xl px-6 py-4">
+            <div class="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+              <div>
+                <h2 class="text-2xl font-semibold text-slate-900">Benvingut/da</h2>
+                <p class="text-sm text-slate-500">Organitza les teves tasques docents de manera eficient.</p>
+              </div>
+              <div class="flex flex-col gap-3 md:flex-row md:items-center md:gap-6">
+                <button type="button" class="inline-flex items-center gap-2 rounded-md bg-slate-900 px-4 py-2 text-sm font-medium text-white shadow-sm transition hover:bg-slate-800 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900" aria-label="Connecta fitxer d'autocòpia">
+                  <span class="lucide" data-lucide="upload"></span>
+                  Connecta fitxer d'autocòpia
+                </button>
+                <span class="inline-flex items-center gap-2 rounded-full bg-emerald-100 px-3 py-1 text-xs font-semibold text-emerald-700" role="status" aria-live="polite">
+                  Estat: <span class="uppercase">Local</span>
+                </span>
+                <label class="relative flex items-center" for="app-search">
+                  <span class="sr-only">Cerca</span>
+                  <span class="absolute left-3 text-slate-400" aria-hidden="true"><span class="lucide" data-lucide="search"></span></span>
+                  <input id="app-search" type="search" placeholder="Cerca..." class="w-full rounded-md border border-slate-200 bg-slate-50 py-2 pl-10 pr-3 text-sm text-slate-900 shadow-sm focus:border-slate-400 focus:bg-white focus:outline-none focus:ring-2 focus:ring-slate-200" />
+                </label>
+              </div>
+            </div>
+          </div>
+        </header>
+        <main id="main-content" class="flex-1 bg-slate-50" role="main">
+          <div class="mx-auto w-full max-w-6xl px-6 py-10 space-y-8">
+            <section id="view-welcome" class="space-y-4" aria-labelledby="welcome-heading">
+              <h3 id="welcome-heading" class="text-xl font-semibold text-slate-900">Benvingut/da a la llibreta docent</h3>
+              <p class="text-slate-600">Selecciona una secció de la barra lateral per començar a gestionar els teus recursos docents.</p>
+            </section>
+            <section id="view-assignatures" class="hidden" aria-labelledby="assignatures-heading">
+              <h3 id="assignatures-heading" class="section-title">Assignatures</h3>
+              <div class="placeholder">Contingut d'assignatures pendent de implementar.</div>
+            </section>
+            <section id="view-alumnes" class="hidden" aria-labelledby="alumnes-heading">
+              <h3 id="alumnes-heading" class="section-title">Alumnes</h3>
+              <div class="placeholder">Contingut d'alumnes pendent de implementar.</div>
+            </section>
+            <section id="view-rubrica" class="hidden" aria-labelledby="rubrica-heading">
+              <h3 id="rubrica-heading" class="section-title">Rúbrica</h3>
+              <div class="placeholder">Contingut de rúbriques pendent de implementar.</div>
+            </section>
+            <section id="view-calendari" class="hidden" aria-labelledby="calendari-heading">
+              <h3 id="calendari-heading" class="section-title">Calendari</h3>
+              <div class="placeholder">Contingut de calendari pendent de implementar.</div>
+            </section>
+            <section id="view-fitxa" class="hidden" aria-labelledby="fitxa-heading">
+              <h3 id="fitxa-heading" class="section-title">Fitxa d'alumne</h3>
+              <div class="placeholder">Contingut de la fitxa d'alumne pendent de implementar.</div>
+            </section>
+            <section id="view-exportacions" class="hidden" aria-labelledby="exportacions-heading">
+              <h3 id="exportacions-heading" class="section-title">Exportacions</h3>
+              <div class="placeholder">Opcions d'exportació pendents de implementar.</div>
+            </section>
+            <section id="view-configuracio" class="hidden" aria-labelledby="configuracio-heading">
+              <h3 id="configuracio-heading" class="section-title">Configuració</h3>
+              <div class="placeholder">Opcions de configuració pendents de implementar.</div>
+            </section>
+          </div>
+        </main>
+        <footer class="bg-white border-t border-slate-200">
+          <div class="mx-auto flex w-full max-w-6xl items-center justify-between px-6 py-4 text-sm text-slate-500">
+            <span>Versió v0.1.0</span>
+            <a href="#" class="font-medium text-slate-600 hover:text-slate-900 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900">Ajuda</a>
+          </div>
+        </footer>
+      </div>
+    </div>
+
+    <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/FileSaver.js/2.0.5/FileSaver.min.js" integrity="sha512-5x6H2FRsaEweAV2XpVZl8vGeOawxjUY8ailqXFz3vGN9VOGBev5nYeD1yfknhk+aoCA8DmFumiY7N2zJPk3uPg==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/docx/8.2.1/docx.umd.js" integrity="sha512-r4Wr9PXgC7cmkQCLOYO6dt26liB754hYOm18CXkDPeZ7dmziLvAmTZxWvwZJfQ3pt3E7g3KIVzaXafPBeli9hQ==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+    <script type="module" src="/src/main.js"></script>
+    <script>
+      document.addEventListener('DOMContentLoaded', () => {
+        if (window.lucide && typeof window.lucide.createIcons === 'function') {
+          window.lucide.createIcons();
+        }
+      });
+    </script>
+  </body>
+</html>
