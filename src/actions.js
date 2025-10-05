@@ -99,6 +99,52 @@ function createCSV(rows, { sep = ';' } = {}) {
     .join('\n');
 }
 
+function assert(condition, message) {
+  if (!condition) {
+    throw new Error(message || 'Condició no complerta');
+  }
+}
+
+function toNonNegativeNumber(value, label) {
+  const num = Number(value);
+  assert(Number.isFinite(num) && num >= 0, `${label || 'valor'} ha de ser un número finit ≥ 0`);
+  return num;
+}
+
+function normalizePesosMap(input) {
+  if (input instanceof Map) {
+    const result = new Map();
+    input.forEach((value, key) => {
+      assert(key !== undefined && key !== null && key !== '', 'Cal un identificador vàlid');
+      result.set(key, toNonNegativeNumber(value, `Pes per ${key}`));
+    });
+    return result;
+  }
+  assert(input && typeof input === 'object', 'Cal un mapa de pesos vàlid');
+  const entries = Object.entries(input);
+  const result = new Map();
+  entries.forEach(([key, value]) => {
+    if (value === undefined || value === null) {
+      return;
+    }
+    assert(key !== undefined && key !== null && key !== '', 'Cal un identificador vàlid');
+    result.set(key, toNonNegativeNumber(value, `Pes per ${key}`));
+  });
+  return result;
+}
+
+function normalizeRelinkEntries(entries) {
+  const list = entries ?? [];
+  assert(Array.isArray(list), 'Cal una llista d\'entrades per relacional activitat/CA');
+  return list.map((entry, index) => {
+    assert(entry && typeof entry === 'object', `Entrada ${index} invàlida`);
+    const { caId } = entry;
+    assert(caId, `Entrada ${index} ha d\'incloure caId`);
+    const pesValue = toNonNegativeNumber(entry.pes_ca ?? entry.pesCa ?? 0, `Pes per ${caId}`);
+    return { caId, pes_ca: pesValue };
+  });
+}
+
 function fallbackDebounce(fn, ms = AUTOSAVE_MS) {
   let timeoutId = null;
   return (...args) => {
@@ -602,6 +648,66 @@ export function createActions({ store, storage, i18n, utils }) {
     return runMutation('addCA', () => store.addCA?.(ceId, data), meta);
   }
 
+  function reorderCE(assignaturaId, ceId, newPosition, options, meta) {
+    let optsInput = {};
+    let metaArg = meta;
+    if (options && typeof options === 'object' && !Array.isArray(options)) {
+      optsInput = options;
+    } else if (!metaArg && options !== undefined) {
+      metaArg = options;
+    }
+    const opts = { ...optsInput };
+    if (Object.prototype.hasOwnProperty.call(optsInput, 'compact')) {
+      opts.compact = Boolean(optsInput.compact);
+    }
+    const numericPosition = Number(newPosition);
+    assert(Number.isFinite(numericPosition) && numericPosition >= 1, 'Nova posició ha de ser ≥ 1');
+    const position = Math.max(1, Math.floor(numericPosition));
+    const result = runMutation(
+      'reorderCE',
+      () => store.moveCE?.(assignaturaId, ceId, position, opts),
+      metaArg,
+    );
+    events.dispatchEvent(
+      createEvent('rubrica:reordered', {
+        scope: 'CE',
+        assignaturaId,
+        ceId,
+        position,
+        options: opts,
+      }),
+    );
+    return result;
+  }
+
+  function reorderCA(ceId, caId, newPosition, options, meta) {
+    let optsInput = {};
+    let metaArg = meta;
+    if (options && typeof options === 'object' && !Array.isArray(options)) {
+      optsInput = options;
+    } else if (!metaArg && options !== undefined) {
+      metaArg = options;
+    }
+    const opts = { ...optsInput };
+    if (Object.prototype.hasOwnProperty.call(optsInput, 'compact')) {
+      opts.compact = Boolean(optsInput.compact);
+    }
+    const numericPosition = Number(newPosition);
+    assert(Number.isFinite(numericPosition) && numericPosition >= 1, 'Nova posició ha de ser ≥ 1');
+    const position = Math.max(1, Math.floor(numericPosition));
+    const result = runMutation('reorderCA', () => store.moveCA?.(ceId, caId, position, opts), metaArg);
+    events.dispatchEvent(
+      createEvent('rubrica:reordered', {
+        scope: 'CA',
+        ceId,
+        caId,
+        position,
+        options: opts,
+      }),
+    );
+    return result;
+  }
+
   function addCategoria(nom, meta) {
     return runMutation('addCategoria', () => store.addCategoria?.(nom), meta);
   }
@@ -610,12 +716,61 @@ export function createActions({ store, storage, i18n, utils }) {
     return runMutation('setPesCategoria', () => store.setPesCategoria?.(assignaturaId, trimestreId, categoriaId, pes), meta);
   }
 
+  function bulkSetPesosDinsCE(ceId, map, meta) {
+    const normalized = normalizePesosMap(map);
+    const payload = Object.fromEntries(normalized);
+    const result = runMutation(
+      'bulkSetPesosDinsCE',
+      () => store.bulkSetPesosDinsCE?.(ceId, payload),
+      meta,
+    );
+    events.dispatchEvent(
+      createEvent('rubrica:bulk', {
+        type: 'pesosCE',
+        ceId,
+        updates: Array.from(normalized.entries()),
+      }),
+    );
+    return result;
+  }
+
   function addActivitat(assignaturaId, data, meta) {
     return runMutation('addActivitat', () => store.addActivitat?.(assignaturaId, data), meta);
   }
 
   function linkCAtoActivitat(activitatId, caId, pes, meta) {
     return runMutation('linkCAtoActivitat', () => store.linkCAtoActivitat?.(activitatId, caId, pes), meta);
+  }
+
+  function bulkRelinkActivitatCA(activitatId, entries, options, meta) {
+    let optsInput = {};
+    let metaArg = meta;
+    if (options && typeof options === 'object' && !Array.isArray(options)) {
+      if (Object.prototype.hasOwnProperty.call(options, 'strict')) {
+        optsInput = options;
+      } else if (!metaArg) {
+        metaArg = options;
+      }
+    }
+    const opts = { ...optsInput };
+    if (Object.prototype.hasOwnProperty.call(optsInput, 'strict')) {
+      opts.strict = Boolean(optsInput.strict);
+    }
+    const normalizedEntries = normalizeRelinkEntries(entries);
+    const result = runMutation(
+      'bulkRelinkActivitatCA',
+      () => store.bulkRelinkActivitatCA?.(activitatId, normalizedEntries, opts),
+      metaArg,
+    );
+    events.dispatchEvent(
+      createEvent('rubrica:bulk', {
+        type: 'activitatCA',
+        activitatId,
+        entries: normalizedEntries.map((entry) => ({ ...entry })),
+        strict: Boolean(opts.strict),
+      }),
+    );
+    return result;
   }
 
   function registraAvaluacioComp(payload, meta) {
@@ -636,6 +791,32 @@ export function createActions({ store, storage, i18n, utils }) {
 
   function exportEncrypted(password) {
     return storage.exportEncrypted?.(password);
+  }
+
+  function undo() {
+    if (typeof store.undo !== 'function') return false;
+    const ok = store.undo();
+    if (ok) {
+      events.dispatchEvent(createEvent('history:undo', {}));
+    }
+    return ok;
+  }
+
+  function redo() {
+    if (typeof store.redo !== 'function') return false;
+    const ok = store.redo();
+    if (ok) {
+      events.dispatchEvent(createEvent('history:redo', {}));
+    }
+    return ok;
+  }
+
+  function canUndo() {
+    return typeof store.canUndo === 'function' ? store.canUndo() : false;
+  }
+
+  function canRedo() {
+    return typeof store.canRedo === 'function' ? store.canRedo() : false;
   }
 
   function exportCSV_AvaluacionsNumeric(assignaturaId, trimestreId) {
@@ -891,10 +1072,14 @@ export function createActions({ store, storage, i18n, utils }) {
     matricula,
     addCE,
     addCA,
+    reorderCE,
+    reorderCA,
     addCategoria,
     setPesCategoria,
+    bulkSetPesosDinsCE,
     addActivitat,
     linkCAtoActivitat,
+    bulkRelinkActivitatCA,
     registraAvaluacioComp,
     registraAvaluacioNum,
     registraAssistencia,
@@ -914,6 +1099,10 @@ export function createActions({ store, storage, i18n, utils }) {
     isFSConnected,
     getLastSaveInfo,
     refreshFromDiskIfNewer,
+    undo,
+    redo,
+    canUndo,
+    canRedo,
     events,
     destroy() {
       unsubscribe?.();
