@@ -11,6 +11,8 @@ export const EVAL_MODE = Object.freeze({
 export const QUALI = Object.freeze(['NA', 'AS', 'AN', 'AE']);
 
 const QUALI_SET = new Set(QUALI);
+const QUALI_STEP = 0.1;
+const RANGE_EPSILON = 1e-6;
 
 export const DEFAULTS = Object.freeze({
   rounding: Object.freeze({ decimals: 1, mode: 'half-up' }),
@@ -112,18 +114,53 @@ export function roundTo(value, decimals = 0, mode = 'half-up') {
   return Number(rounded.toFixed(decimals));
 }
 
-function validateQualitativeRanges(ranges) {
+export function validateQualitativeRanges(ranges) {
   assert(ranges && typeof ranges === 'object', 'Les franges qualitatives han de ser un objecte');
   const clean = {};
   QUALI.forEach((key) => {
     const range = ranges[key];
     assert(Array.isArray(range) && range.length === 2, `Franja qualitativa ${key} ha de ser [min,max]`);
-    const [min, max] = range;
-    assert(
-      typeof min === 'number' && typeof max === 'number' && min <= max,
-      `Franja qualitativa ${key} ha de contenir números i min ≤ max`,
-    );
+    const min = Number(range[0]);
+    const max = Number(range[1]);
+    assert(Number.isFinite(min) && Number.isFinite(max), `Franja qualitativa ${key} ha de contenir números`);
+    assert(min <= max, `Franja qualitativa ${key} ha de complir min ≤ max`);
     clean[key] = [min, max];
+  });
+
+  const firstRange = clean[QUALI[0]];
+  const lastRange = clean[QUALI[QUALI.length - 1]];
+  assert(firstRange[0] <= 0 + RANGE_EPSILON, 'Les franges qualitatives han de començar a 0');
+  assert(lastRange[1] >= 10 - RANGE_EPSILON, 'Les franges qualitatives han d\'arribar fins a 10');
+
+  const ticks = [];
+  for (let i = 0; i <= Math.round(10 / QUALI_STEP); i += 1) {
+    const value = Number((i * QUALI_STEP).toFixed(1));
+    ticks.push(value);
+  }
+
+  ticks.forEach((value) => {
+    let matches = 0;
+    QUALI.forEach((key) => {
+      const [min, max] = clean[key];
+      if (value >= min - RANGE_EPSILON && value <= max + RANGE_EPSILON) {
+        matches += 1;
+      }
+    });
+    assert(matches > 0, `Valor ${value} fora de les franges qualitatives`);
+    assert(matches === 1, `Valor ${value} apareix en múltiples franges qualitatives`);
+  });
+
+  return clean;
+}
+
+export function validateWeights(weights = {}) {
+  assert(weights && typeof weights === 'object', 'Cal un objecte de pesos');
+  const clean = {};
+  Object.entries(weights).forEach(([key, value]) => {
+    if (value === undefined || value === null) return;
+    const num = Number(value);
+    assert(Number.isFinite(num) && num >= 0, `El camp ${key} ha de ser un nombre finit ≥ 0`);
+    clean[key] = num;
   });
   return clean;
 }
@@ -466,7 +503,7 @@ export function computeNotaPerAlumne(state, assignaturaId, alumneId, trimestreId
   return { valueNumRaw: raw, valueNumRounded: rounded };
 }
 
-export function reorderCE(state, assignaturaId, ceId, newPosition) {
+export function reorderCE(state, assignaturaId, ceId, newPosition, { compact = true } = {}) {
   assert(Number.isInteger(newPosition) && newPosition >= 1, 'Nova posició CE ha de ser ≥ 1');
   const ces = state.ces.allIds
     .map((id) => state.ces.byId[id])
@@ -475,23 +512,49 @@ export function reorderCE(state, assignaturaId, ceId, newPosition) {
   const ce = ces.find((item) => item.id === ceId);
   assert(ce, `CE ${ceId} no trobat per reordenar`);
   const filtered = ces.filter((item) => item.id !== ceId);
-  const index = Math.min(newPosition - 1, filtered.length);
+  const index = Math.min(Math.max(newPosition - 1, 0), filtered.length);
   filtered.splice(index, 0, ce);
+  const used = new Set();
   filtered.forEach((item, idx) => {
-    state.ces.byId[item.id].position = idx + 1;
+    const entry = state.ces.byId[item.id];
+    if (compact) {
+      entry.position = idx + 1;
+      used.add(entry.position);
+      return;
+    }
+    let desired = item.id === ceId ? newPosition : entry.position ?? idx + 1;
+    desired = Number.isFinite(desired) && desired >= 1 ? Math.floor(desired) : idx + 1;
+    while (used.has(desired)) {
+      desired += 1;
+    }
+    entry.position = desired;
+    used.add(entry.position);
   });
 }
 
-export function reorderCA(state, ceId, caId, newPosition) {
+export function reorderCA(state, ceId, caId, newPosition, { compact = true } = {}) {
   assert(Number.isInteger(newPosition) && newPosition >= 1, 'Nova posició CA ha de ser ≥ 1');
   const cas = collectCAsForCE(state, ceId).sort((a, b) => (a.position || 0) - (b.position || 0));
   const ca = cas.find((item) => item.id === caId);
   assert(ca, `CA ${caId} no trobat per reordenar`);
   const filtered = cas.filter((item) => item.id !== caId);
-  const index = Math.min(newPosition - 1, filtered.length);
+  const index = Math.min(Math.max(newPosition - 1, 0), filtered.length);
   filtered.splice(index, 0, ca);
+  const used = new Set();
   filtered.forEach((item, idx) => {
-    state.cas.byId[item.id].position = idx + 1;
+    const entry = state.cas.byId[item.id];
+    if (compact) {
+      entry.position = idx + 1;
+      used.add(entry.position);
+      return;
+    }
+    let desired = item.id === caId ? newPosition : entry.position ?? idx + 1;
+    desired = Number.isFinite(desired) && desired >= 1 ? Math.floor(desired) : idx + 1;
+    while (used.has(desired)) {
+      desired += 1;
+    }
+    entry.position = desired;
+    used.add(entry.position);
   });
 }
 export function isInSameVincle(state, assignaturaIdA, assignaturaIdB) {
@@ -712,13 +775,25 @@ function updateInCollection(state, key, id, patch) {
   state[key].byId[id] = { ...state[key].byId[id], ...patch };
 }
 
+function removeFromCollection(state, key, id) {
+  ensureCollection(state, key);
+  if (!state[key].byId[id]) return;
+  delete state[key].byId[id];
+  state[key].allIds = state[key].allIds.filter((entryId) => entryId !== id);
+}
+
 export function createStore(initialState = createEmptyState()) {
   const state = cloneState(initialState);
   state.version = state.version || 0;
+  state.historial = Array.isArray(state.historial) ? state.historial : [];
   const listeners = new Set();
   let batching = false;
   let batchBefore = null;
   let batchMeta = null;
+  const undoStack = [];
+  const redoStack = [];
+  const MAX_STACK = 20;
+  let suppressHistory = false;
 
   function notify(change) {
     const snapshot = getState();
@@ -731,10 +806,28 @@ export function createStore(initialState = createEmptyState()) {
     });
   }
 
+  function pushUndoSnapshot(snapshot) {
+    undoStack.push(cloneState(snapshot));
+    while (undoStack.length > MAX_STACK) {
+      undoStack.shift();
+    }
+  }
+
+  function pushRedoSnapshot(snapshot) {
+    redoStack.push(cloneState(snapshot));
+    while (redoStack.length > MAX_STACK) {
+      redoStack.shift();
+    }
+  }
+
   function recordChange(meta, before) {
     const after = cloneState(state);
     if (before && isEqual(before, after)) {
       return;
+    }
+    if (!suppressHistory && before) {
+      pushUndoSnapshot(before);
+      redoStack.length = 0;
     }
     state.version += 1;
     const entry = {
@@ -745,6 +838,9 @@ export function createStore(initialState = createEmptyState()) {
     if (before) entry.before = before;
     entry.after = after;
     state.historial.push(entry);
+    while (state.historial.length > 200) {
+      state.historial.shift();
+    }
     notify(entry);
   }
 
@@ -780,6 +876,58 @@ export function createStore(initialState = createEmptyState()) {
       batchBefore = null;
       batchMeta = null;
     }
+  }
+
+  function replaceState(nextState) {
+    const snapshot = cloneState(nextState);
+    Object.keys(state).forEach((key) => {
+      if (!(key in snapshot)) {
+        delete state[key];
+      }
+    });
+    Object.entries(snapshot).forEach(([key, value]) => {
+      state[key] = value;
+    });
+  }
+
+  function undo() {
+    if (!undoStack.length) return false;
+    const target = undoStack.pop();
+    const current = cloneState(state);
+    pushRedoSnapshot(current);
+    suppressHistory = true;
+    try {
+      applyMutation({ action: 'undo' }, () => {
+        replaceState(target);
+      });
+    } finally {
+      suppressHistory = false;
+    }
+    return true;
+  }
+
+  function redo() {
+    if (!redoStack.length) return false;
+    const target = redoStack.pop();
+    const current = cloneState(state);
+    pushUndoSnapshot(current);
+    suppressHistory = true;
+    try {
+      applyMutation({ action: 'redo' }, () => {
+        replaceState(target);
+      });
+    } finally {
+      suppressHistory = false;
+    }
+    return true;
+  }
+
+  function canUndo() {
+    return undoStack.length > 0;
+  }
+
+  function canRedo() {
+    return redoStack.length > 0;
   }
 
   function patch(partial, meta) {
@@ -884,6 +1032,12 @@ export function createStore(initialState = createEmptyState()) {
     return id;
   }
 
+  function moveCE(assignaturaId, ceId, newPosition, options = {}) {
+    applyMutation({ action: 'reorderCE' }, () => {
+      reorderCE(state, assignaturaId, ceId, newPosition, options);
+    });
+  }
+
   function addCA(ceId, data) {
     const ce = state.ces.byId[ceId];
     assert(ce, `CE ${ceId} no trobat`);
@@ -892,6 +1046,11 @@ export function createStore(initialState = createEmptyState()) {
       const indices = data.index ? { ceIndex: ce.index, index: data.index } : assertCAIdRules(id);
       const casCE = collectCAsForCE(state, ceId);
       const nextPosition = casCE.length + 1;
+      let pesDinsCEValue = data.pesDinsCE;
+      if (pesDinsCEValue !== undefined) {
+        const sanitized = validateWeights({ pesDinsCE: pesDinsCEValue });
+        pesDinsCEValue = sanitized.pesDinsCE;
+      }
       const ca = {
         id,
         ceId,
@@ -899,11 +1058,17 @@ export function createStore(initialState = createEmptyState()) {
         index: indices.index,
         textBetween: data.textBetween || '',
         position: data.position || nextPosition,
-        pesDinsCE: data.pesDinsCE,
+        pesDinsCE: pesDinsCEValue,
       };
       addToCollection(state, 'cas', ca);
     });
     return id;
+  }
+
+  function moveCA(ceId, caId, newPosition, options = {}) {
+    applyMutation({ action: 'reorderCA' }, () => {
+      reorderCA(state, ceId, caId, newPosition, options);
+    });
   }
 
   function addCategoria(nom) {
@@ -917,11 +1082,29 @@ export function createStore(initialState = createEmptyState()) {
   function setPesCategoria(assignaturaId, trimestreId, categoriaId, pes) {
     applyMutation({ action: 'setPesCategoria' }, () => {
       const assignatura = getAssignatura(state, assignaturaId);
-      assertNonNegative(pes, 'Pes de categoria');
+      const sanitized = validateWeights({ pesCategoria: pes });
+      const value = sanitized.pesCategoria ?? 0;
       if (!assignatura.categoriaPesos[trimestreId]) {
         assignatura.categoriaPesos[trimestreId] = {};
       }
-      assignatura.categoriaPesos[trimestreId][categoriaId] = pes;
+      assignatura.categoriaPesos[trimestreId][categoriaId] = value;
+    });
+  }
+
+  function bulkSetPesosDinsCE(ceId, mapCaIdToPes) {
+    applyMutation({ action: 'bulkSetPesosDinsCE' }, () => {
+      const ce = state.ces.byId[ceId];
+      assert(ce, `CE ${ceId} no trobat`);
+      const entries =
+        mapCaIdToPes instanceof Map
+          ? Array.from(mapCaIdToPes.entries())
+          : Object.entries(mapCaIdToPes || {});
+      entries.forEach(([caId, pes]) => {
+        const ca = state.cas.byId[caId];
+        assert(ca && ca.ceId === ceId, `CA ${caId} no pertany al CE ${ceId}`);
+        const sanitized = validateWeights({ pesDinsCE: pes });
+        state.cas.byId[caId].pesDinsCE = sanitized.pesDinsCE ?? 0;
+      });
     });
   }
 
@@ -929,15 +1112,16 @@ export function createStore(initialState = createEmptyState()) {
     const id = data.id || createId('activitat');
     applyMutation({ action: 'addActivitat' }, () => {
       const assignatura = getAssignatura(state, assignaturaId);
+      const sanitized = validateWeights({ pesActivitat: data.pesActivitat ?? 0 });
+      const pesActivitat = sanitized.pesActivitat ?? 0;
       const activitat = {
         id,
         assignaturaId: assignatura.id,
         data: data.data ? new Date(data.data) : new Date(),
         categoriaId: data.categoriaId,
-        pesActivitat: data.pesActivitat ?? 0,
+        pesActivitat,
         descripcio: data.descripcio,
       };
-      assertNonNegative(activitat.pesActivitat, 'Pes d\'activitat');
       addToCollection(state, 'activitats', activitat);
     });
     return id;
@@ -1275,15 +1459,60 @@ export function createStore(initialState = createEmptyState()) {
     applyMutation({ action: 'linkCAtoActivitat' }, () => {
       assert(state.activitats.byId[activitatId], `Activitat ${activitatId} no trobada`);
       assert(state.cas.byId[caId], `CA ${caId} no trobat`);
-      assertNonNegative(pes_ca, 'Pes CA');
+      const sanitized = validateWeights({ pes_ca });
       addToCollection(state, 'activitatCA', {
         id,
         activitatId,
         caId,
-        pes_ca,
+        pes_ca: sanitized.pes_ca ?? 0,
       });
     });
     return id;
+  }
+
+  function bulkRelinkActivitatCA(activitatId, entries, { strict = false } = {}) {
+    applyMutation({ action: 'bulkRelinkActivitatCA' }, () => {
+      const activitat = state.activitats.byId[activitatId];
+      assert(activitat, `Activitat ${activitatId} no trobada`);
+      const normalized = new Map();
+      const provided = Array.isArray(entries) ? entries : [];
+      provided.forEach((entry, idx) => {
+        assert(entry && typeof entry === 'object', `Entrada ${idx} de relació CA/activitat invàlida`);
+        const caId = entry.caId;
+        assert(caId, 'Cada entrada ha d\'incloure caId');
+        const ca = state.cas.byId[caId];
+        assert(ca, `CA ${caId} no trobat`);
+        const sanitized = validateWeights({ pes_ca: entry.pes_ca });
+        normalized.set(caId, sanitized.pes_ca ?? 0);
+      });
+      const existing = state.activitatCA.allIds
+        .map((id) => state.activitatCA.byId[id])
+        .filter((link) => link.activitatId === activitatId);
+      const keepIds = new Set();
+      normalized.forEach((pesValue, caId) => {
+        const current = existing.find((link) => link.caId === caId);
+        if (current) {
+          state.activitatCA.byId[current.id].pes_ca = pesValue;
+          keepIds.add(current.id);
+        } else {
+          const id = createId('activitatCA');
+          addToCollection(state, 'activitatCA', {
+            id,
+            activitatId,
+            caId,
+            pes_ca: pesValue,
+          });
+          keepIds.add(id);
+        }
+      });
+      if (strict) {
+        existing.forEach((link) => {
+          if (!keepIds.has(link.id)) {
+            removeFromCollection(state, 'activitatCA', link.id);
+          }
+        });
+      }
+    });
   }
 
   function registraAvaluacioComp({ alumneId, activitatId, caId, valorQuali }) {
@@ -1357,6 +1586,10 @@ export function createStore(initialState = createEmptyState()) {
     subscribe,
     patch,
     transact,
+    undo,
+    redo,
+    canUndo,
+    canRedo,
     addAssignatura,
     updateAssignatura,
     addAlumne,
@@ -1366,8 +1599,12 @@ export function createStore(initialState = createEmptyState()) {
     addCA,
     addCategoria,
     setPesCategoria,
+    bulkSetPesosDinsCE,
+    moveCE,
+    moveCA,
     addActivitat,
     linkCAtoActivitat,
+    bulkRelinkActivitatCA,
     registraAvaluacioComp,
     registraAvaluacioNum,
     registraAssistencia,
@@ -1395,3 +1632,110 @@ export function createStore(initialState = createEmptyState()) {
     exportStateForSave: () => exportStateForSave(state),
   };
 }
+
+const DEV_MODE = typeof process !== 'undefined' && process.env?.NODE_ENV === 'development';
+
+function runSampleComputation() {
+  const store = createStore(createEmptyState());
+  const assignaturaId = store.addAssignatura({
+    id: 'assignatura_test',
+    nom: 'Prova',
+    mode: EVAL_MODE.COMPETENCIAL,
+    rounding: { decimals: 1, mode: 'half-up' },
+  });
+  const alumneId = store.addAlumne({ id: 'alumne_test', nom: 'Alumne Prova' });
+  store.matricula(alumneId, assignaturaId);
+
+  const ce1Id = store.addCE(assignaturaId, { id: 'ce_test_1', index: 1, position: 1 });
+  const ce2Id = store.addCE(assignaturaId, { id: 'ce_test_2', index: 2, position: 2 });
+
+  const ca11Id = store.addCA(ce1Id, { id: 'ca_test_11', index: 1, pesDinsCE: 2, position: 1 });
+  const ca12Id = store.addCA(ce1Id, { id: 'ca_test_12', index: 2, pesDinsCE: 1, position: 2 });
+  const ca21Id = store.addCA(ce2Id, { id: 'ca_test_21', index: 1, pesDinsCE: 1, position: 1 });
+
+  const activitat1Id = store.addActivitat(assignaturaId, {
+    id: 'act_test_1',
+    data: new Date('2024-02-01'),
+    categoriaId: null,
+    pesActivitat: 1,
+    descripcio: 'Activitat 1',
+  });
+  const activitat2Id = store.addActivitat(assignaturaId, {
+    id: 'act_test_2',
+    data: new Date('2024-03-15'),
+    categoriaId: null,
+    pesActivitat: 1,
+    descripcio: 'Activitat 2',
+  });
+
+  store.linkCAtoActivitat(activitat1Id, ca11Id, 2);
+  store.linkCAtoActivitat(activitat1Id, ca12Id, 1);
+  store.linkCAtoActivitat(activitat1Id, ca21Id, 1);
+  store.linkCAtoActivitat(activitat2Id, ca21Id, 2);
+
+  store.registraAvaluacioComp({
+    alumneId,
+    activitatId: activitat1Id,
+    caId: ca11Id,
+    valorQuali: 'AE',
+  });
+  store.registraAvaluacioComp({
+    alumneId,
+    activitatId: activitat1Id,
+    caId: ca12Id,
+    valorQuali: 'AS',
+  });
+  store.registraAvaluacioComp({
+    alumneId,
+    activitatId: activitat1Id,
+    caId: ca21Id,
+    valorQuali: 'AS',
+  });
+  store.registraAvaluacioComp({
+    alumneId,
+    activitatId: activitat2Id,
+    caId: ca21Id,
+    valorQuali: 'AN',
+  });
+
+  const ca11 = store.computeCAForAlumne(assignaturaId, alumneId, ca11Id);
+  const ca12 = store.computeCAForAlumne(assignaturaId, alumneId, ca12Id);
+  const ca21 = store.computeCAForAlumne(assignaturaId, alumneId, ca21Id);
+  const ce1 = store.computeCEForAlumne(assignaturaId, alumneId, ce1Id);
+  const ce2 = store.computeCEForAlumne(assignaturaId, alumneId, ce2Id);
+
+  assert(Math.abs(ca11.valueNumRounded - 9.5) < 1e-6, 'Resultat CA11 inesperat');
+  assert(Math.abs(ca12.valueNumRounded - 6.0) < 1e-6, 'Resultat CA12 inesperat');
+  assert(Math.abs(ca21.valueNumRounded - 7.3) < 1e-6, 'Resultat CA21 inesperat');
+  assert(Math.abs(ce1.valueNumRounded - 8.3) < 1e-6, 'Resultat CE1 inesperat');
+  assert(Math.abs(ce2.valueNumRounded - 7.3) < 1e-6, 'Resultat CE2 inesperat');
+
+  assert(ce1.quali === 'AN', 'Qualitativa CE1 inesperada');
+  assert(ce2.quali === 'AN', 'Qualitativa CE2 inesperada');
+
+  return {
+    assignaturaId,
+    alumneId,
+    ces: {
+      [ce1Id]: ce1,
+      [ce2Id]: ce2,
+    },
+    cas: {
+      [ca11Id]: ca11,
+      [ca12Id]: ca12,
+      [ca21Id]: ca21,
+    },
+  };
+}
+
+export let __selfTest;
+
+if (typeof window !== 'undefined' && window.__DEV__) {
+  __selfTest = function __selfTest() {
+    const result = runSampleComputation();
+    console.info('[self-test] Resultats de mostra', result);
+    return result;
+  };
+}
+
+export const __test_computeSample = DEV_MODE ? () => runSampleComputation() : undefined;

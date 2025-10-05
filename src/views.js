@@ -1,4 +1,6 @@
 /* eslint-disable no-param-reassign */
+import { QUALI, validateQualitativeRanges, __selfTest } from './state.js';
+
 const lucide = globalThis.lucide;
 
 const VIEW_IDS = [
@@ -86,6 +88,235 @@ const uiState = {
     viewMonth: null,
   },
 };
+
+uiState.rubrica.selection = { anchor: null, focus: null, cells: new Set() };
+uiState.rubrica.clipboard = '';
+uiState.rubrica.conflictActive = false;
+uiState.rubrica.layout = { rows: [], cols: [] };
+
+const rubricaRuntime = {
+  pendingCells: new Set(),
+  cellFeedback: new Map(),
+  cellElements: new Map(),
+  drag: { type: null, id: null, list: null, ghost: null },
+};
+
+let rubricaLiveRegion = null;
+let rubricaSelecting = false;
+let rubricaPointerUpAttached = false;
+
+const RUBRICA_SELECTED_CLASS =
+  'ring-2 ring-emerald-400 ring-offset-2 ring-offset-white shadow-sm shadow-emerald-100';
+
+function getRubricaSelection() {
+  if (!uiState.rubrica.selection) {
+    uiState.rubrica.selection = { anchor: null, focus: null, cells: new Set() };
+  }
+  return uiState.rubrica.selection;
+}
+
+function resetRubricaSelection() {
+  const selection = getRubricaSelection();
+  selection.anchor = null;
+  selection.focus = null;
+  selection.cells = new Set();
+}
+
+function getRubricaCellKey(alumneId, caId) {
+  return `${alumneId}::${caId}`;
+}
+
+function ensureRubricaLiveRegion() {
+  if (rubricaLiveRegion) return rubricaLiveRegion;
+  const doc = getDocument();
+  rubricaLiveRegion = createElement('div', {
+    className: 'sr-only',
+    attrs: { 'aria-live': 'polite', role: 'status' },
+  });
+  doc.body.appendChild(rubricaLiveRegion);
+  return rubricaLiveRegion;
+}
+
+function announceRubrica(message) {
+  const region = ensureRubricaLiveRegion();
+  region.textContent = message;
+}
+
+function updateRubricaSelection(anchor, focus, layout, { additive = false } = {}) {
+  const selection = getRubricaSelection();
+  if (!layout) {
+    resetRubricaSelection();
+    return selection;
+  }
+  if (!additive) {
+    selection.cells.clear();
+  }
+  if (anchor) {
+    selection.anchor = anchor;
+  }
+  if (focus) {
+    selection.focus = focus;
+  }
+  if (!selection.anchor || !selection.focus) {
+    if (selection.anchor) {
+      selection.cells.add(selection.anchor.key);
+    }
+    return selection;
+  }
+  const minRow = Math.min(selection.anchor.rowIndex, selection.focus.rowIndex);
+  const maxRow = Math.max(selection.anchor.rowIndex, selection.focus.rowIndex);
+  const minCol = Math.min(selection.anchor.colIndex, selection.focus.colIndex);
+  const maxCol = Math.max(selection.anchor.colIndex, selection.focus.colIndex);
+  for (let row = minRow; row <= maxRow; row += 1) {
+    const alumneId = layout.rows[row];
+    for (let col = minCol; col <= maxCol; col += 1) {
+      const caId = layout.cols[col];
+      selection.cells.add(getRubricaCellKey(alumneId, caId));
+    }
+  }
+  return selection;
+}
+
+function syncRubricaSelectionClasses(root) {
+  if (!root) return;
+  const selection = getRubricaSelection();
+  root.querySelectorAll('[data-cell-key]').forEach((cell) => {
+    const key = cell.dataset.cellKey;
+    const isSelected = selection.cells.has(key);
+    cell.classList.toggle('is-selected', isSelected);
+    cell.classList.toggle('ring-0', !isSelected);
+    if (isSelected) {
+      cell.classList.add(...RUBRICA_SELECTED_CLASS.split(' '));
+    } else {
+      RUBRICA_SELECTED_CLASS.split(' ').forEach((cls) => cell.classList.remove(cls));
+    }
+    cell.toggleAttribute('data-selection-anchor', selection.anchor?.key === key);
+    cell.toggleAttribute('data-selection-focus', selection.focus?.key === key);
+  });
+}
+
+function resetRubricaDragState() {
+  if (rubricaRuntime.drag.ghost?.parentNode) {
+    rubricaRuntime.drag.ghost.remove();
+  }
+  rubricaRuntime.drag = { type: null, id: null, list: null, ghost: null };
+}
+
+function markRubricaCellPending(key) {
+  rubricaRuntime.pendingCells.add(key);
+}
+
+function clearRubricaPendingCells() {
+  rubricaRuntime.pendingCells.clear();
+}
+
+function setRubricaCellStatus(key, status, message) {
+  const entry = rubricaRuntime.cellElements.get(key);
+  if (!entry) return;
+  const dot = entry.status;
+  if (!dot) return;
+  const palette = {
+    success: 'bg-emerald-500',
+    warn: 'bg-amber-500',
+    error: 'bg-rose-500',
+  };
+  dot.classList.remove('bg-emerald-500', 'bg-amber-500', 'bg-rose-500');
+  dot.classList.add(palette[status] || 'bg-emerald-500');
+  dot.style.opacity = '1';
+  dot.classList.remove('opacity-0');
+  if (message) {
+    dot.setAttribute('title', message);
+  } else {
+    dot.removeAttribute('title');
+  }
+  const existing = rubricaRuntime.cellFeedback.get(key);
+  if (existing?.timeout) {
+    clearTimeout(existing.timeout);
+  }
+  const duration = status === 'error' ? 4000 : status === 'warn' ? 2500 : 1500;
+  const timeout = setTimeout(() => {
+    dot.classList.add('opacity-0');
+    dot.style.opacity = '0';
+    rubricaRuntime.cellFeedback.delete(key);
+  }, duration);
+  rubricaRuntime.cellFeedback.set(key, { status, timeout });
+}
+
+function flushRubricaPending(status, message) {
+  const keys = Array.from(rubricaRuntime.pendingCells);
+  clearRubricaPendingCells();
+  keys.forEach((key) => setRubricaCellStatus(key, status, message));
+}
+
+function createRubricaGhost() {
+  const ghost = createElement('li', {
+    className:
+      'pointer-events-none my-1 h-10 rounded-md border-2 border-dashed border-emerald-400 bg-emerald-50 opacity-80 transition',
+  });
+  ghost.dataset.ghost = 'true';
+  return ghost;
+}
+
+function handleRubricaDragOver(event) {
+  event.preventDefault();
+  const list = rubricaRuntime.drag.list;
+  if (!list) return;
+  const items = Array.from(list.children).filter((child) => !child.dataset.ghost);
+  if (!rubricaRuntime.drag.ghost) {
+    rubricaRuntime.drag.ghost = createRubricaGhost();
+  }
+  const targetItem = event.target?.closest('[data-item-id]');
+  if (targetItem && targetItem.parentNode === list) {
+    const rect = targetItem.getBoundingClientRect();
+    const before = event.clientY < rect.top + rect.height / 2;
+    list.insertBefore(rubricaRuntime.drag.ghost, before ? targetItem : targetItem.nextSibling);
+  } else if (items.length) {
+    list.appendChild(rubricaRuntime.drag.ghost);
+  }
+}
+
+function attachRubricaDrag(list, { type, onReorder }) {
+  if (!list) return;
+  list.addEventListener('dragover', handleRubricaDragOver);
+  list.addEventListener('dragleave', (event) => {
+    if (!list.contains(event.relatedTarget)) {
+      resetRubricaDragState();
+    }
+  });
+  list.addEventListener('drop', (event) => {
+    event.preventDefault();
+    const drag = rubricaRuntime.drag;
+    if (!drag.id || drag.type !== type || !drag.ghost) {
+      resetRubricaDragState();
+      return;
+    }
+    const children = Array.from(list.children).filter((child) => !child.dataset.ghost);
+    const ghostIndex = Array.from(list.children).indexOf(drag.ghost);
+    resetRubricaDragState();
+    if (ghostIndex < 0) return;
+    const newPosition = ghostIndex + 1;
+    onReorder(drag.id, newPosition);
+  });
+}
+
+function prepareRubricaDraggable(item, { id, type }) {
+  item.setAttribute('draggable', 'true');
+  item.dataset.itemId = id;
+  item.addEventListener('dragstart', (event) => {
+    event.dataTransfer.effectAllowed = 'move';
+    rubricaRuntime.drag = {
+      type,
+      id,
+      list: item.parentElement,
+      ghost: createRubricaGhost(),
+    };
+    item.classList.add('opacity-60');
+  });
+  item.addEventListener('dragend', () => {
+    item.classList.remove('opacity-60');
+    resetRubricaDragState();
+  });
+}
 
 const CALENDAR_MUTATIONS = new Set([
   'setCursRange',
@@ -406,13 +637,28 @@ export function Modal(title, content, actions = []) {
       attrs: { type: action.type || 'button' },
       text: action.label,
     });
+    if (action.role) {
+      btn.dataset.actionRole = action.role;
+    }
+    if (action.disabled) {
+      btn.disabled = true;
+      btn.setAttribute('aria-disabled', 'true');
+    }
     btn.addEventListener('click', (event) => {
+      if (btn.disabled) {
+        event.preventDefault();
+        event.stopPropagation();
+        return;
+      }
       if (action.onClick) {
         action.onClick(event, closeModal);
       } else {
         closeModal();
       }
     });
+    if (typeof action.onMount === 'function') {
+      action.onMount(btn);
+    }
     footer.appendChild(btn);
   });
   dialog.append(header, body, footer);
@@ -727,7 +973,73 @@ function openAssignaturaConfig(assignatura) {
   });
   const ranges = assignatura?.qualitativeRanges || appContext.store.getState().configGlobal.qualitativeRanges;
   const rangeWrapper = createElement('div', { className: 'grid gap-3 md:grid-cols-2' });
-  Object.entries(ranges || {}).forEach(([key, value]) => {
+  const errorMsg = createElement('p', {
+    className: 'hidden rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-sm font-medium text-rose-700',
+    attrs: { 'aria-live': 'polite' },
+  });
+  const qualitativeInputs = new Map();
+  let saveBtn = null;
+
+  const setError = (message) => {
+    if (!message) {
+      errorMsg.textContent = '';
+      errorMsg.classList.add('hidden');
+      if (saveBtn) {
+        saveBtn.disabled = false;
+        saveBtn.removeAttribute('aria-disabled');
+      }
+      return;
+    }
+    errorMsg.textContent = message;
+    errorMsg.classList.remove('hidden');
+    if (saveBtn) {
+      saveBtn.disabled = true;
+      saveBtn.setAttribute('aria-disabled', 'true');
+    }
+  };
+
+  const interpretQualiError = (error) => {
+    const message = error?.message || '';
+    if (/apareix en múltiples/iu.test(message)) return 'Els intervals no poden solapar-se.';
+    if (/fora de les franges/iu.test(message) || /començar a 0/iu.test(message) || /arribar fins a 10/iu.test(message)) {
+      return 'Les franges han de cobrir de 0 a 10 sense buits.';
+    }
+    if (/min\s*≤\s*max/iu.test(message) || /min ≤ max/iu.test(message)) {
+      return 'El mínim ha de ser menor o igual que el màxim.';
+    }
+    return message || 'Franges qualitatives invàlides.';
+  };
+
+  const collectRanges = () => {
+    const qualitativeRanges = {};
+    let hasError = false;
+    QUALI.forEach((key) => {
+      if (hasError) return;
+      const entry = qualitativeInputs.get(key);
+      const min = Number(entry.min.value);
+      const max = Number(entry.max.value);
+      if (Number.isNaN(min) || Number.isNaN(max)) {
+        hasError = true;
+        setError('Els valors han de ser numèrics.');
+        return;
+      }
+      qualitativeRanges[key] = [min, max];
+    });
+    if (hasError) {
+      return { valid: false, qualitativeRanges: null };
+    }
+    try {
+      const clean = validateQualitativeRanges(qualitativeRanges);
+      setError('');
+      return { valid: true, qualitativeRanges: clean };
+    } catch (error) {
+      setError(interpretQualiError(error));
+      return { valid: false, qualitativeRanges: null };
+    }
+  };
+
+  QUALI.forEach((key) => {
+    const value = ranges?.[key] || [0, 0];
     const [min, max] = value;
     const minInput = createElement('input', {
       className:
@@ -739,6 +1051,12 @@ function openAssignaturaConfig(assignatura) {
         'w-full rounded-md border border-slate-300 px-3 py-2 text-sm shadow-sm focus:border-slate-500 focus:outline-none focus:ring-2 focus:ring-slate-200',
       attrs: { type: 'number', step: '0.1', min: '0', max: '10', value: max, name: `${key}-max` },
     });
+    qualitativeInputs.set(key, { min: minInput, max: maxInput });
+    const handleInput = () => {
+      collectRanges();
+    };
+    minInput.addEventListener('input', handleInput);
+    maxInput.addEventListener('input', handleInput);
     rangeWrapper.appendChild(
       createElement('div', {
         className: 'flex flex-col gap-2 rounded-md border border-slate-200 p-3',
@@ -763,13 +1081,19 @@ function openAssignaturaConfig(assignatura) {
       children: [createElement('span', { text: 'Decimals' }), decimalsInput],
     }),
     rangeWrapper,
+    errorMsg,
   );
-  Modal('Configuració de l\'assignatura', form, [
+  const modal = Modal('Configuració de l\'assignatura', form, [
     { label: 'Tanca', onClick: closeModal },
     {
       label: 'Desa',
       primary: true,
       type: 'submit',
+      role: 'save',
+      onMount: (btn) => {
+        saveBtn = btn;
+        collectRanges();
+      },
       onClick: (event) => {
         event.preventDefault();
         const decimals = Number(decimalsInput.value);
@@ -777,24 +1101,14 @@ function openAssignaturaConfig(assignatura) {
           Toast('Els decimals han de ser entre 0 i 3.', 'warn');
           return;
         }
-        const qualitativeRanges = {};
-        let valid = true;
-        ['NA', 'AS', 'AN', 'AE'].forEach((key) => {
-          if (!valid) return;
-          const min = Number(form.querySelector(`[name="${key}-min"]`).value);
-          const max = Number(form.querySelector(`[name="${key}-max"]`).value);
-          if (Number.isNaN(min) || Number.isNaN(max) || min > max) {
-            valid = false;
-            Toast(`Interval invàlid per ${key}`, 'warn');
-            return;
-          }
-          qualitativeRanges[key] = [min, max];
-        });
-        if (!valid) return;
+        const result = collectRanges();
+        if (!result.valid || !result.qualitativeRanges) {
+          return;
+        }
         try {
           appContext.store.updateAssignatura(assignatura.id, {
             rounding: { decimals, mode: assignatura?.rounding?.mode || 'half-up' },
-            qualitativeRanges,
+            qualitativeRanges: result.qualitativeRanges,
           });
           Toast('Configuració actualitzada.', 'success');
           dirtyFlags.view = true;
@@ -806,6 +1120,13 @@ function openAssignaturaConfig(assignatura) {
       },
     },
   ]);
+  if (modal?.element) {
+    const saveButton = modal.element.querySelector('button[data-action-role="save"]');
+    if (saveButton) {
+      saveBtn = saveButton;
+      collectRanges();
+    }
+  }
 }
 
 function renderAssignaturaDetail(assignatura, state) {
@@ -895,12 +1216,35 @@ function renderCEPanel(assignatura, state) {
   const panel = createElement('div', {
     className: 'space-y-3 rounded-lg border border-slate-200 p-4',
   });
-  panel.appendChild(
+  const header = createElement('div', {
+    className: 'flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between',
+  });
+  header.appendChild(
     createElement('h5', {
       className: 'text-sm font-semibold uppercase tracking-wide text-slate-500',
       text: 'Competències específiques',
     }),
   );
+  const actionsBar = createElement('div', { className: 'flex flex-wrap gap-2 text-xs' });
+  const bulkBtn = createElement('button', {
+    className:
+      'inline-flex items-center gap-2 rounded-md border border-slate-200 bg-white px-3 py-1 font-semibold text-slate-600 shadow-sm transition hover:bg-slate-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900',
+    attrs: { type: 'button' },
+    children: [
+      createElement('span', { className: 'lucide h-3.5 w-3.5', attrs: { 'data-lucide': 'list-checks' } }),
+      createElement('span', { text: 'Reordenació massiva' }),
+    ],
+  });
+  bulkBtn.addEventListener('click', () => {
+    openRubricaBulkDialog({
+      scope: 'ce',
+      assignatura,
+      items: ces,
+    });
+  });
+  actionsBar.appendChild(bulkBtn);
+  header.appendChild(actionsBar);
+  panel.appendChild(header);
   if (!ces?.length) {
     panel.appendChild(
       createElement('p', {
@@ -914,10 +1258,11 @@ function renderCEPanel(assignatura, state) {
   ces.forEach((ce) => {
     const selected = uiState.assignatures.selectedCE === ce.id;
     const item = createElement('li', {
-      className: `rounded-md border px-3 py-2 text-sm transition ${
+      className: `rounded-md border px-3 py-2 text-sm transition focus-within:ring-2 focus-within:ring-emerald-400 ${
         selected ? 'border-slate-500 bg-slate-100' : 'border-slate-200 bg-white'
       }`,
     });
+    prepareRubricaDraggable(item, { id: ce.id, type: 'ce' });
     const code = `CE${ce.textBetween || ''}${ce.index}`;
     const button = createElement('button', {
       className: 'flex w-full items-center justify-between text-left',
@@ -932,10 +1277,39 @@ function renderCEPanel(assignatura, state) {
       dirtyFlags.view = true;
       scheduleRender('ce-select');
     });
+    button.addEventListener('keydown', (event) => {
+      if (!event.altKey) return;
+      if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return;
+      event.preventDefault();
+      const delta = event.key === 'ArrowUp' ? -1 : 1;
+      const targetPosition = Math.max(1, Math.min((ce.position || 0) + delta, ces.length));
+      if (targetPosition === ce.position) return;
+      try {
+        appContext.actions.reorderCE(assignatura.id, ce.id, targetPosition, { compact: true });
+        announceRubrica(`CE ${code} moguda a la posició ${targetPosition}.`);
+        dirtyFlags.view = true;
+        scheduleRender('ce-alt-move');
+      } catch (error) {
+        Toast(`No s'ha pogut reordenar la CE: ${error.message || error}`, 'error');
+      }
+    });
     item.appendChild(button);
     list.appendChild(item);
   });
   panel.appendChild(list);
+  attachRubricaDrag(list, {
+    type: 'ce',
+    onReorder: (ceId, newPosition) => {
+      try {
+        appContext.actions.reorderCE(assignatura.id, ceId, newPosition, { compact: true });
+        announceRubrica(`Reordenada CE a la posició ${newPosition}.`);
+        dirtyFlags.view = true;
+        scheduleRender('ce-drag');
+      } catch (error) {
+        Toast(`No s'ha pogut reordenar la CE: ${error.message || error}`, 'error');
+      }
+    },
+  });
   return panel;
 }
 
@@ -946,12 +1320,35 @@ function renderCAPanel(assignatura, state) {
   const selectedCE = uiState.assignatures.selectedCE
     ? state.ces?.byId?.[uiState.assignatures.selectedCE]
     : null;
-  panel.appendChild(
+  const header = createElement('div', {
+    className: 'flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between',
+  });
+  header.appendChild(
     createElement('h5', {
       className: 'text-sm font-semibold uppercase tracking-wide text-slate-500',
-      text: selectedCE ? `Criteris d'avaluació de CE${selectedCE.textBetween || ''}${selectedCE.index}` : 'Criteris d\'avaluació',
+      text: selectedCE
+        ? `Criteris d'avaluació de CE${selectedCE.textBetween || ''}${selectedCE.index}`
+        : 'Criteris d\'avaluació',
     }),
   );
+  if (selectedCE) {
+    const actionsBar = createElement('div', { className: 'flex flex-wrap gap-2 text-xs' });
+    const bulkBtn = createElement('button', {
+      className:
+        'inline-flex items-center gap-2 rounded-md border border-slate-200 bg-white px-3 py-1 font-semibold text-slate-600 shadow-sm transition hover:bg-slate-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900',
+      attrs: { type: 'button' },
+      children: [
+        createElement('span', { className: 'lucide h-3.5 w-3.5', attrs: { 'data-lucide': 'list-checks' } }),
+        createElement('span', { text: 'Reordenació massiva' }),
+      ],
+    });
+    bulkBtn.addEventListener('click', () => {
+      openRubricaBulkDialog({ scope: 'ca', assignatura, ce: selectedCE, items: cas });
+    });
+    actionsBar.appendChild(bulkBtn);
+    header.appendChild(actionsBar);
+  }
+  panel.appendChild(header);
   if (!selectedCE) {
     panel.appendChild(
       createElement('p', {
@@ -974,8 +1371,10 @@ function renderCAPanel(assignatura, state) {
   const list = createElement('ul', { className: 'space-y-2' });
   cas.forEach((ca) => {
     const item = createElement('li', {
-      className: 'rounded-md border border-slate-200 bg-white px-3 py-2 text-sm shadow-sm',
+      className:
+        'rounded-md border border-slate-200 bg-white px-3 py-2 text-sm shadow-sm focus-within:ring-2 focus-within:ring-emerald-400',
     });
+    prepareRubricaDraggable(item, { id: ca.id, type: 'ca' });
     item.append(
       createElement('div', {
         className: 'flex items-center justify-between',
@@ -991,10 +1390,138 @@ function renderCAPanel(assignatura, state) {
         ],
       }),
     );
+    item.addEventListener('keydown', (event) => {
+      if (!event.altKey) return;
+      if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return;
+      event.preventDefault();
+      const delta = event.key === 'ArrowUp' ? -1 : 1;
+      const targetPosition = Math.max(1, Math.min((ca.position || 0) + delta, cas.length));
+      if (targetPosition === ca.position) return;
+      try {
+        appContext.actions.reorderCA(selectedCE.id, ca.id, targetPosition, { compact: true });
+        announceRubrica(`CA ${ca.index} mogut a la posició ${targetPosition}.`);
+        dirtyFlags.view = true;
+        scheduleRender('ca-alt-move');
+      } catch (error) {
+        Toast(`No s'ha pogut reordenar el criteri: ${error.message || error}`, 'error');
+      }
+    });
     list.appendChild(item);
   });
   panel.appendChild(list);
+  attachRubricaDrag(list, {
+    type: 'ca',
+    onReorder: (caId, newPosition) => {
+      try {
+        appContext.actions.reorderCA(selectedCE.id, caId, newPosition, { compact: true });
+        announceRubrica(`Reordenada CA a la posició ${newPosition}.`);
+        dirtyFlags.view = true;
+        scheduleRender('ca-drag');
+      } catch (error) {
+        Toast(`No s'ha pogut reordenar el criteri: ${error.message || error}`, 'error');
+      }
+    },
+  });
   return panel;
+}
+
+function openRubricaBulkDialog({ scope, assignatura, ce }) {
+  const form = createElement('form', { className: 'space-y-4 text-sm text-slate-700' });
+  const compactOption = createElement('input', {
+    className: 'h-4 w-4 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500',
+    attrs: { type: 'checkbox', checked: 'checked', id: 'bulk-compact' },
+  });
+  const recalcOption = createElement('input', {
+    className: 'h-4 w-4 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500',
+    attrs: { type: 'checkbox', checked: 'checked', id: 'bulk-recalc' },
+  });
+  form.append(
+    createElement('p', {
+      className: 'text-sm text-slate-600',
+      text: scope === 'ce'
+        ? 'Aplica canvis massius a les competències específiques seleccionades.'
+        : `Aplica canvis massius als criteris de la ${ce ? `CE${ce.textBetween || ''}${ce.index}` : 'CE seleccionada'}.`,
+    }),
+    createElement('label', {
+      className: 'flex items-center gap-2',
+      children: [compactOption, createElement('span', { text: 'Compactar posicions (1..N)' })],
+    }),
+    createElement('label', {
+      className: 'flex items-center gap-2',
+      children: [
+        recalcOption,
+        createElement('span', {
+          text: 'Recalcular identificadors numèrics mantenint el textBetween',
+        }),
+      ],
+    }),
+  );
+
+  const applyBulk = () => {
+    const compact = compactOption.checked;
+    const recalc = recalcOption.checked;
+    const snapshot = appContext.store.getState();
+    if (scope === 'ce') {
+      const allCes = snapshot.ces.allIds
+        .map((id) => snapshot.ces.byId[id])
+        .filter((entry) => entry.assignaturaId === assignatura.id)
+        .sort((a, b) => (a.position || 0) - (b.position || 0));
+      const updated = { ...snapshot.ces.byId };
+      allCes.forEach((entry, index) => {
+        const clone = { ...entry };
+        if (compact) {
+          clone.position = index + 1;
+        }
+        if (recalc) {
+          clone.index = index + 1;
+        }
+        updated[clone.id] = clone;
+      });
+      appContext.store.patch({ ces: { ...snapshot.ces, byId: updated } }, { action: 'rubrica:bulkCE' });
+      Toast('Reordenació aplicada a les CE.', 'success');
+      announceRubrica('Reordenació massiva de CE completada.');
+    } else if (scope === 'ca' && ce) {
+      const allCas = snapshot.cas.allIds
+        .map((id) => snapshot.cas.byId[id])
+        .filter((entry) => entry.ceId === ce.id)
+        .sort((a, b) => (a.position || 0) - (b.position || 0));
+      const updated = { ...snapshot.cas.byId };
+      allCas.forEach((entry, index) => {
+        const clone = { ...entry };
+        if (compact) {
+          clone.position = index + 1;
+        }
+        if (recalc) {
+          clone.index = index + 1;
+          clone.ceIndex = ce.index;
+        }
+        updated[clone.id] = clone;
+      });
+      appContext.store.patch({ cas: { ...snapshot.cas, byId: updated } }, { action: 'rubrica:bulkCA' });
+      Toast('Reordenació aplicada als criteris.', 'success');
+      announceRubrica('Reordenació massiva de criteris completada.');
+    }
+    dirtyFlags.view = true;
+    scheduleRender('rubrica-bulk');
+    closeModal();
+  };
+
+  Modal('Reordenació massiva', form, [
+    { label: 'Cancel·la', onClick: closeModal },
+    {
+      label: 'Aplica',
+      primary: true,
+      type: 'submit',
+      onClick: (event) => {
+        event.preventDefault();
+        try {
+          applyBulk();
+        } catch (error) {
+          Toast(`No s'ha pogut aplicar la reordenació: ${error.message || error}`, 'error');
+        }
+      },
+    },
+  ]);
 }
 
 function renderCategoriesPanel(assignatura, state) {
@@ -1041,10 +1568,28 @@ function renderCategoriesPanel(assignatura, state) {
                 'w-24 rounded-md border border-slate-300 px-2 py-1 text-xs shadow-sm focus:border-slate-500 focus:outline-none focus:ring-2 focus:ring-slate-200',
               attrs: { type: 'number', min: '0', step: '0.1', value },
             });
+            const hint = createElement('span', {
+              className: 'hidden text-[11px] font-medium text-rose-600',
+              text: 'Els pesos han de ser ≥ 0.',
+            });
+            const updateValidity = (currentValue) => {
+              if (Number.isNaN(currentValue) || currentValue < 0) {
+                input.classList.add('border-rose-400', 'text-rose-700');
+                hint.classList.remove('hidden');
+                return false;
+              }
+              input.classList.remove('border-rose-400', 'text-rose-700');
+              hint.classList.add('hidden');
+              return true;
+            };
+            updateValidity(Number(value));
+            input.addEventListener('input', (event) => {
+              const next = Number(event.currentTarget.value);
+              updateValidity(next);
+            });
             input.addEventListener('change', (event) => {
               const pes = Number(event.currentTarget.value);
-              if (Number.isNaN(pes) || pes < 0) {
-                Toast('El pes ha de ser ≥ 0.', 'warn');
+              if (!updateValidity(pes)) {
                 return;
               }
               try {
@@ -1056,7 +1601,10 @@ function renderCategoriesPanel(assignatura, state) {
             });
             const badge = createElement('span', {
               className: 'inline-flex items-center gap-2 rounded-md border border-slate-200 px-2 py-1 text-xs',
-              children: [createElement('span', { className: 'font-semibold text-slate-600', text: trimId }), input],
+              children: [
+                createElement('span', { className: 'font-semibold text-slate-600', text: trimId }),
+                createElement('span', { className: 'flex flex-col gap-0.5', children: [input, hint] }),
+              ],
             });
             container.appendChild(badge);
           });
@@ -1290,6 +1838,586 @@ function findActivitatForCA(state, caId) {
   return link?.activitatId || null;
 }
 
+function mapNumberToQuali(assignatura, value) {
+  const ranges = assignatura?.qualitativeRanges || appContext.store.getState().configGlobal.qualitativeRanges;
+  if (!ranges) return null;
+  const num = Number(value);
+  if (!Number.isFinite(num)) return null;
+  for (const key of QUALI) {
+    const range = ranges[key];
+    if (!range) continue;
+    const [min, max] = range;
+    if (num >= min - 1e-6 && num <= max + 1e-6) {
+      return key;
+    }
+  }
+  return null;
+}
+
+function normalizeQualiInput(rawValue, assignatura) {
+  if (rawValue === null || rawValue === undefined) return null;
+  const value = String(rawValue).trim();
+  if (!value) return null;
+  const upper = value.toUpperCase();
+  if (QUALI.includes(upper)) return upper;
+  const parsed = Number(value.replace(',', '.'));
+  if (Number.isFinite(parsed)) {
+    return mapNumberToQuali(assignatura, parsed);
+  }
+  return null;
+}
+
+function renderRubricaGrid(assignatura, state, tableData, { onValueChange } = {}) {
+  const layout = {
+    rows: tableData.alumnes.slice(),
+    cols: tableData.cas.slice(),
+  };
+  uiState.rubrica.layout = layout;
+  rubricaRuntime.cellElements.clear();
+  if (!rubricaPointerUpAttached) {
+    getDocument().addEventListener('pointerup', () => {
+      rubricaSelecting = false;
+    });
+    rubricaPointerUpAttached = true;
+  }
+
+  const caActivitatMap = new Map();
+  layout.cols.forEach((caId) => {
+    caActivitatMap.set(caId, findActivitatForCA(state, caId));
+  });
+
+  const section = createElement('section', {
+    className: 'space-y-4 rounded-lg border border-slate-200 bg-white p-4 shadow-sm',
+  });
+
+  const commandBar = createElement('div', { className: 'flex flex-wrap items-center gap-2 text-xs sm:text-sm' });
+  const commandInfo = createElement('span', {
+    className: 'rounded-md bg-slate-100 px-2 py-1 text-[11px] font-semibold uppercase tracking-wide text-slate-500',
+    text: 'Accions de selecció',
+  });
+  commandBar.appendChild(commandInfo);
+  if (uiState.rubrica.conflictActive) {
+    commandBar.classList.add('ring-2', 'ring-amber-400', 'ring-offset-2', 'ring-offset-white');
+  }
+
+  const createCommandButton = (label, handler, tone = 'slate') => {
+    const palette = {
+      slate: 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50',
+      emerald: 'border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100',
+      amber: 'border-amber-200 bg-amber-50 text-amber-700 hover:bg-amber-100',
+    };
+    const btn = createElement('button', {
+      className: `inline-flex items-center gap-2 rounded-md border px-3 py-1 font-semibold transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-500 ${
+        palette[tone] || palette.slate
+      }`,
+      attrs: { type: 'button' },
+      text: label,
+    });
+    btn.addEventListener('click', handler);
+    return btn;
+  };
+
+  const QUALI_COMMANDS = ['NA', 'AS', 'AN', 'AE'];
+
+  const selection = () => getRubricaSelection();
+
+  const updateLocalValue = (key, newValue) => {
+    const entry = rubricaRuntime.cellElements.get(key);
+    if (entry) {
+      entry.value = newValue;
+      entry.button.textContent = newValue;
+      entry.editor.value = newValue;
+    }
+    const [alumneId, caId] = key.split('::');
+    if (!tableData.values[alumneId]) tableData.values[alumneId] = {};
+    if (!tableData.values[alumneId][caId]) tableData.values[alumneId][caId] = {};
+    tableData.values[alumneId][caId].quali = newValue;
+    const ranges = assignatura?.qualitativeRanges || appContext.store.getState().configGlobal.qualitativeRanges;
+    const range = ranges?.[newValue];
+    if (range) {
+      const midpoint = (Number(range[0]) + Number(range[1])) / 2;
+      if (Number.isFinite(midpoint)) {
+        tableData.values[alumneId][caId].valueNumRounded = midpoint;
+      }
+    }
+  };
+
+  const applyValueToCell = (alumneId, caId, value, { silent = false } = {}) => {
+    const key = getRubricaCellKey(alumneId, caId);
+    const activitatId = caActivitatMap.get(caId);
+    if (!activitatId) {
+      setRubricaCellStatus(key, 'warn', 'Sense activitat vinculada.');
+      if (!silent) {
+        Toast('Cap activitat vinculada a aquest criteri.', 'warn');
+      }
+      return;
+    }
+    try {
+      appContext.store.registraAvaluacioComp({
+        alumneId,
+        activitatId,
+        caId,
+        valorQuali: value,
+      });
+      markRubricaCellPending(key);
+      updateLocalValue(key, value);
+      if (typeof onValueChange === 'function') {
+        onValueChange({ alumneId, caId, value });
+      }
+    } catch (error) {
+      setRubricaCellStatus(key, 'error', error.message || 'Error en desar.');
+      if (!silent) {
+        Toast(`No s'ha pogut desar la rúbrica: ${error.message || error}`, 'error');
+      }
+    }
+  };
+
+  const applyCommandToSelection = (value) => {
+    const keys = Array.from(selection().cells);
+    if (!keys.length) {
+      Toast('Selecciona cel·les per aplicar el canvi.', 'warn');
+      return;
+    }
+    appContext.store.transact(() => {
+      keys.forEach((key) => {
+        const [alumneId, caId] = key.split('::');
+        applyValueToCell(alumneId, caId, value, { silent: true });
+      });
+    }, { action: 'rubrica:bulkAssign' });
+    Toast(`Aplicat ${value} a ${keys.length} cel·les.`, 'success');
+    announceRubrica(`Aplicat ${value} a ${keys.length} cel·les.`);
+    syncRubricaSelectionClasses(section);
+  };
+
+  QUALI_COMMANDS.forEach((value) => {
+    commandBar.appendChild(
+      createCommandButton(value, () => applyCommandToSelection(value), 'emerald'),
+    );
+  });
+
+  const clearBtn = createCommandButton('Esborra', () => applyCommandToSelection('NA'));
+  commandBar.appendChild(clearBtn);
+
+  const copySelection = async () => {
+    const sel = selection();
+    if (!sel.anchor || !sel.focus) {
+      Toast('Selecciona una àrea per copiar.', 'warn');
+      return;
+    }
+    const minRow = Math.min(sel.anchor.rowIndex, sel.focus.rowIndex);
+    const maxRow = Math.max(sel.anchor.rowIndex, sel.focus.rowIndex);
+    const minCol = Math.min(sel.anchor.colIndex, sel.focus.colIndex);
+    const maxCol = Math.max(sel.anchor.colIndex, sel.focus.colIndex);
+    const rows = [];
+    for (let row = minRow; row <= maxRow; row += 1) {
+      const alumneId = layout.rows[row];
+      const cells = [];
+      for (let col = minCol; col <= maxCol; col += 1) {
+        const caId = layout.cols[col];
+        const key = getRubricaCellKey(alumneId, caId);
+        const entry = rubricaRuntime.cellElements.get(key);
+        const value = entry?.value || tableData.values?.[alumneId]?.[caId]?.quali || 'NA';
+        cells.push(value);
+      }
+      rows.push(cells.join('\t'));
+    }
+    const text = rows.join('\n');
+    try {
+      await navigator.clipboard.writeText(text);
+      uiState.rubrica.clipboard = text;
+      Toast('Selecció copiada al porta-retalls.', 'success');
+    } catch (error) {
+      uiState.rubrica.clipboard = text;
+      Toast('No s\'ha pogut accedir al porta-retalls. S\'ha guardat internament.', 'warn');
+    }
+  };
+
+  const pasteSelection = (text) => {
+    if (!text) return;
+    const sel = selection();
+    if (!sel.anchor) {
+      Toast('Selecciona una cel·la on enganxar.', 'warn');
+      return;
+    }
+    const rows = text
+      .split(/\r?\n/)
+      .map((row) => row.split(/\t/).map((cell) => normalizeQualiInput(cell, assignatura)))
+      .filter((row) => row.length);
+    if (!rows.length) return;
+    const startRow = sel.anchor.rowIndex;
+    const startCol = sel.anchor.colIndex;
+    const ops = [];
+    rows.forEach((rowValues, rowOffset) => {
+      rowValues.forEach((value, colOffset) => {
+        if (!value) return;
+        const rowIndex = startRow + rowOffset;
+        const colIndex = startCol + colOffset;
+        if (rowIndex >= layout.rows.length || colIndex >= layout.cols.length) return;
+        const alumneId = layout.rows[rowIndex];
+        const caId = layout.cols[colIndex];
+        ops.push({ alumneId, caId, value });
+      });
+    });
+    if (!ops.length) {
+      Toast('Cap valor vàlid a enganxar.', 'warn');
+      return;
+    }
+    appContext.store.transact(() => {
+      ops.forEach(({ alumneId, caId, value }) => {
+        applyValueToCell(alumneId, caId, value, { silent: true });
+      });
+    }, { action: 'rubrica:paste' });
+    Toast(`Enganxats ${ops.length} valors.`, 'success');
+    announceRubrica(`Enganxats ${ops.length} valors.`);
+    syncRubricaSelectionClasses(section);
+  };
+
+  commandBar.appendChild(createCommandButton('Copia (Ctrl+C)', copySelection));
+  const pasteBtn = createCommandButton('Enganxa (Ctrl+V)', () => {
+    if (uiState.rubrica.clipboard) {
+      pasteSelection(uiState.rubrica.clipboard);
+    }
+  });
+  commandBar.appendChild(pasteBtn);
+
+  section.appendChild(commandBar);
+
+  const scrollContainer = createElement('div', {
+    className: 'relative max-h-[70vh] overflow-auto rounded-md border border-slate-200',
+    attrs: { tabindex: '0' },
+  });
+  if (uiState.rubrica.conflictActive) {
+    scrollContainer.classList.add('ring-2', 'ring-amber-300');
+  }
+  const table = createElement('table', {
+    className: 'min-w-full border-collapse text-xs sm:text-sm',
+  });
+  const thead = createElement('thead', { className: 'sticky top-0 z-10 bg-slate-50 text-xs uppercase tracking-wide text-slate-500' });
+  const headRow = createElement('tr');
+  headRow.appendChild(
+    createElement('th', {
+      className: 'min-w-[14rem] px-3 py-2 text-left font-semibold text-slate-600',
+      text: 'Alumne',
+    }),
+  );
+  layout.cols.forEach((caId) => {
+    headRow.appendChild(
+      createElement('th', {
+        className: 'px-2 py-2 text-center font-semibold text-slate-600',
+        text: getCAName(state, caId),
+      }),
+    );
+  });
+  thead.appendChild(headRow);
+  table.appendChild(thead);
+  const tbody = createElement('tbody', { className: 'bg-white text-slate-700' });
+  table.appendChild(tbody);
+  scrollContainer.appendChild(table);
+  section.appendChild(scrollContainer);
+
+  const virtualizationState = {
+    enabled: layout.rows.length * layout.cols.length > 2000,
+    rowHeight: 44,
+    start: 0,
+    end: layout.rows.length,
+  };
+
+  const ensureCellVisible = (rowIndex) => {
+    if (!virtualizationState.enabled) return;
+    const { rowHeight } = virtualizationState;
+    const top = rowIndex * rowHeight;
+    const bottom = top + rowHeight;
+    const viewTop = scrollContainer.scrollTop;
+    const viewBottom = viewTop + scrollContainer.clientHeight;
+    if (top < viewTop) {
+      scrollContainer.scrollTop = top;
+    } else if (bottom > viewBottom) {
+      scrollContainer.scrollTop = bottom - scrollContainer.clientHeight;
+    }
+  };
+
+  const selectCell = (entry, { extend = false } = {}) => {
+    const sel = selection();
+    const anchorMeta = extend && sel.anchor ? null : entry;
+    if (!sel.anchor) {
+      updateRubricaSelection(entry, entry, layout);
+    } else {
+      updateRubricaSelection(anchorMeta || entry, entry, layout);
+    }
+    syncRubricaSelectionClasses(section);
+  };
+
+  const moveFocus = (rowDelta, colDelta) => {
+    const sel = selection();
+    const current = sel.focus || sel.anchor;
+    if (!current) return;
+    let targetRow = Math.min(Math.max(current.rowIndex + rowDelta, 0), layout.rows.length - 1);
+    let targetCol = Math.min(Math.max(current.colIndex + colDelta, 0), layout.cols.length - 1);
+    ensureCellVisible(targetRow);
+    requestAnimationFrame(() => {
+      const key = getRubricaCellKey(layout.rows[targetRow], layout.cols[targetCol]);
+      const target = rubricaRuntime.cellElements.get(key);
+      if (target) {
+        updateRubricaSelection(target, target, layout);
+        syncRubricaSelectionClasses(section);
+        target.button.focus();
+      }
+    });
+  };
+
+  const createCell = (rowIndex, colIndex) => {
+    const alumneId = layout.rows[rowIndex];
+    const caId = layout.cols[colIndex];
+    const key = getRubricaCellKey(alumneId, caId);
+    const currentValue =
+      tableData.values?.[alumneId]?.[caId]?.quali ||
+      findQualiFor(state, alumneId, caId) ||
+      'NA';
+    const td = createElement('td', {
+      className: 'px-2 py-1 text-center align-middle text-sm text-slate-700',
+      attrs: { 'data-row-index': String(rowIndex), 'data-col-index': String(colIndex) },
+    });
+    const wrapper = createElement('div', { className: 'relative flex items-center justify-center' });
+    const button = createElement('button', {
+      className:
+        'relative w-full min-w-[4rem] rounded-md border border-slate-200 bg-white px-2 py-1 text-xs font-semibold text-slate-700 shadow-sm transition hover:border-emerald-300 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-500',
+      attrs: {
+        type: 'button',
+        'data-cell-key': key,
+        'data-row-index': String(rowIndex),
+        'data-col-index': String(colIndex),
+        'aria-label': `Qualitativa ${getCAName(state, caId)} per ${getAlumneName(state, alumneId)}`,
+      },
+      text: currentValue,
+    });
+    const statusDot = createElement('span', {
+      className: 'pointer-events-none absolute right-1.5 top-1.5 h-2 w-2 rounded-full opacity-0 transition',
+      attrs: { 'aria-hidden': 'true' },
+    });
+    const editor = createElement('select', {
+      className:
+        'absolute inset-0 hidden rounded-md border border-slate-300 bg-white px-2 py-1 text-xs shadow focus:outline-none focus:ring-2 focus:ring-emerald-500',
+    });
+    QUALI.forEach((value) => {
+      const option = createElement('option', { attrs: { value }, text: value });
+      if (value === currentValue) option.selected = true;
+      editor.appendChild(option);
+    });
+    wrapper.append(button, editor, statusDot);
+    td.appendChild(wrapper);
+    const entry = {
+      key,
+      rowIndex,
+      colIndex,
+      alumneId,
+      caId,
+      value: currentValue,
+      button,
+      editor,
+      status: statusDot,
+    };
+    rubricaRuntime.cellElements.set(key, entry);
+
+    const openEditor = () => {
+      editor.classList.remove('hidden');
+      button.classList.add('opacity-0');
+      editor.value = entry.value;
+      requestAnimationFrame(() => editor.focus());
+    };
+
+    const closeEditor = (commit = false) => {
+      editor.classList.add('hidden');
+      button.classList.remove('opacity-0');
+      button.focus();
+      if (commit) {
+        const next = editor.value;
+        if (next && next !== entry.value) {
+          applyValueToCell(alumneId, caId, next);
+        }
+      } else {
+        editor.value = entry.value;
+      }
+    };
+
+    button.addEventListener('mousedown', (event) => {
+      event.preventDefault();
+      rubricaSelecting = true;
+      selectCell(entry, { extend: event.shiftKey });
+    });
+    button.addEventListener('mouseenter', () => {
+      if (!rubricaSelecting) return;
+      updateRubricaSelection(null, entry, layout);
+      syncRubricaSelectionClasses(section);
+    });
+    button.addEventListener('dblclick', () => {
+      selectCell(entry);
+      openEditor();
+    });
+    button.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        openEditor();
+        return;
+      }
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        rubricaSelecting = false;
+        return;
+      }
+      if (event.key === 'Delete' || event.key === 'Backspace') {
+        event.preventDefault();
+        applyCommandToSelection('NA');
+        return;
+      }
+      if (event.key === 'ArrowRight') {
+        event.preventDefault();
+        moveFocus(0, 1);
+        return;
+      }
+      if (event.key === 'ArrowLeft') {
+        event.preventDefault();
+        moveFocus(0, -1);
+        return;
+      }
+      if (event.key === 'ArrowUp') {
+        event.preventDefault();
+        moveFocus(-1, 0);
+        return;
+      }
+      if (event.key === 'ArrowDown') {
+        event.preventDefault();
+        moveFocus(1, 0);
+        return;
+      }
+      if (event.key === 'Tab') {
+        event.preventDefault();
+        moveFocus(0, event.shiftKey ? -1 : 1);
+      }
+    });
+    editor.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        closeEditor(false);
+      }
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        closeEditor(true);
+      }
+    });
+    editor.addEventListener('change', () => {
+      closeEditor(true);
+    });
+    editor.addEventListener('blur', () => {
+      closeEditor(false);
+    });
+    return td;
+  };
+
+  const renderRows = () => {
+    clearElement(tbody);
+    rubricaRuntime.cellElements.clear();
+    if (!virtualizationState.enabled) {
+      for (let rowIndex = 0; rowIndex < layout.rows.length; rowIndex += 1) {
+        const row = createElement('tr', { attrs: { 'data-row-index': String(rowIndex) } });
+        row.appendChild(
+          createElement('th', {
+            className: 'sticky left-0 z-10 bg-slate-50 px-3 py-2 text-left font-semibold text-slate-600 shadow-sm',
+            text: getAlumneName(state, layout.rows[rowIndex]),
+          }),
+        );
+        for (let colIndex = 0; colIndex < layout.cols.length; colIndex += 1) {
+          row.appendChild(createCell(rowIndex, colIndex));
+        }
+        tbody.appendChild(row);
+      }
+      syncRubricaSelectionClasses(section);
+      const sampleRow = tbody.querySelector('tr[data-row-index]');
+      if (sampleRow) {
+        virtualizationState.rowHeight = sampleRow.getBoundingClientRect().height;
+      }
+      return;
+    }
+
+    const totalRows = layout.rows.length;
+    const viewportHeight = scrollContainer.clientHeight || 400;
+    const estimate = virtualizationState.rowHeight || 44;
+    const visibleCount = Math.max(1, Math.ceil(viewportHeight / estimate) + 4);
+    const start = Math.max(0, Math.floor(scrollContainer.scrollTop / estimate) - 2);
+    const end = Math.min(totalRows, start + visibleCount);
+    virtualizationState.start = start;
+    virtualizationState.end = end;
+    const topSpacerHeight = start * estimate;
+    const bottomSpacerHeight = Math.max(0, (totalRows - end) * estimate);
+    if (topSpacerHeight > 0) {
+      const spacerTop = createElement('tr', { attrs: { 'aria-hidden': 'true' } });
+      const spacerTopCell = createElement('td', { attrs: { colspan: String(layout.cols.length + 1) } });
+      spacerTopCell.style.height = `${topSpacerHeight}px`;
+      spacerTop.appendChild(spacerTopCell);
+      tbody.appendChild(spacerTop);
+    }
+    for (let rowIndex = start; rowIndex < end; rowIndex += 1) {
+      const row = createElement('tr', { attrs: { 'data-row-index': String(rowIndex) } });
+      row.appendChild(
+        createElement('th', {
+          className: 'sticky left-0 z-10 bg-slate-50 px-3 py-2 text-left font-semibold text-slate-600 shadow-sm',
+          text: getAlumneName(state, layout.rows[rowIndex]),
+        }),
+      );
+      for (let colIndex = 0; colIndex < layout.cols.length; colIndex += 1) {
+        row.appendChild(createCell(rowIndex, colIndex));
+      }
+      tbody.appendChild(row);
+    }
+    if (bottomSpacerHeight > 0) {
+      const spacerBottom = createElement('tr', { attrs: { 'aria-hidden': 'true' } });
+      const spacerBottomCell = createElement('td', { attrs: { colspan: String(layout.cols.length + 1) } });
+      spacerBottomCell.style.height = `${bottomSpacerHeight}px`;
+      spacerBottom.appendChild(spacerBottomCell);
+      tbody.appendChild(spacerBottom);
+    }
+    syncRubricaSelectionClasses(section);
+    const sampleRow = tbody.querySelector('tr[data-row-index]');
+    if (sampleRow) {
+      virtualizationState.rowHeight = sampleRow.getBoundingClientRect().height || virtualizationState.rowHeight;
+    }
+  };
+
+  renderRows();
+  scrollContainer.addEventListener('scroll', () => {
+    if (virtualizationState.enabled) {
+      renderRows();
+    }
+  });
+
+  section.addEventListener('paste', (event) => {
+    if (!event.clipboardData) return;
+    const text = event.clipboardData.getData('text');
+    if (!text) return;
+    event.preventDefault();
+    pasteSelection(text);
+  });
+
+  section.addEventListener('keydown', (event) => {
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'c') {
+      event.preventDefault();
+      copySelection();
+    } else if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'v') {
+      event.preventDefault();
+      if (uiState.rubrica.clipboard) {
+        pasteSelection(uiState.rubrica.clipboard);
+      }
+    } else if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z') {
+      event.preventDefault();
+      appContext.actions.undo?.();
+    } else if ((event.ctrlKey || event.metaKey) && (event.key.toLowerCase() === 'y' || (event.shiftKey && event.key.toLowerCase() === 'z'))) {
+      event.preventDefault();
+      appContext.actions.redo?.();
+    }
+  });
+
+  return section;
+}
+
 function renderRubrica(container, state) {
   clearElement(container);
   container.classList.add('space-y-6');
@@ -1398,6 +2526,33 @@ function renderRubrica(container, state) {
 
   container.appendChild(controls);
 
+  if (uiState.rubrica.conflictActive) {
+    const banner = createElement('div', {
+      className:
+        'flex flex-col gap-3 rounded-md border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-800 sm:flex-row sm:items-center sm:justify-between',
+    });
+    banner.appendChild(
+      createElement('span', {
+        className: 'font-medium',
+        text: 'S\'ha detectat un conflicte amb la còpia de seguretat. Revisa els canvis abans de continuar.',
+      }),
+    );
+    const reloadBtn = createElement('button', {
+      className:
+        'inline-flex items-center gap-2 rounded-md border border-amber-300 bg-white px-3 py-1 font-semibold text-amber-800 shadow-sm transition hover:bg-amber-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-500',
+      attrs: { type: 'button' },
+      children: [
+        createElement('span', { className: 'lucide h-3.5 w-3.5', attrs: { 'data-lucide': 'refresh-ccw' } }),
+        createElement('span', { text: 'Recarrega des de fitxer' }),
+      ],
+    });
+    reloadBtn.addEventListener('click', () => {
+      appContext.actions.refreshFromDiskIfNewer?.();
+    });
+    banner.appendChild(reloadBtn);
+    container.appendChild(banner);
+  }
+
   let tableData = null;
   try {
     tableData = appContext.store.computeTaulaCompetencial(
@@ -1414,65 +2569,23 @@ function renderRubrica(container, state) {
     return;
   }
 
-  const columns = [
-    {
-      id: 'alumne',
-      label: 'Alumne',
-      accessor: (row) => getAlumneName(state, row.alumneId),
-    },
-  ];
-  tableData.cas.forEach((caId) => {
-    columns.push({ id: caId, label: getCAName(state, caId) });
-  });
-  const rows = tableData.alumnes.map((alumneId) => ({ alumneId }));
+  resetRubricaSelection();
 
-  const table = DataTable({
-    caption: 'Rúbrica competencial',
-    columns,
-    rows,
+  const summaryBadges = new Map();
+  const updateSummary = (caId) => {
+    if (!summaryBadges.has(caId)) return;
+    const badge = summaryBadges.get(caId);
+    const values = tableData.alumnes.map((alumneId) => tableData.values?.[alumneId]?.[caId]?.valueNumRounded ?? 0);
+    const average = values.reduce((acc, num) => acc + num, 0) / (values.length || 1);
+    badge.textContent = `${getCAName(state, caId)} · Mitjana ${formatNumber(average, 2)}`;
+  };
+
+  const gridSection = renderRubricaGrid(assignatura, state, tableData, {
+    onValueChange: ({ caId }) => {
+      updateSummary(caId);
+    },
   });
-  const tbody = table.querySelector('tbody');
-  Array.from(tbody.rows).forEach((tr, rowIndex) => {
-    const alumneId = rows[rowIndex].alumneId;
-    tableData.cas.forEach((caId, colIndex) => {
-      const cell = tr.cells[colIndex + 1];
-      const currentValue = findQualiFor(state, alumneId, caId) || tableData.values?.[alumneId]?.[caId]?.quali || 'NA';
-      const select = createElement('select', {
-        className:
-          'w-full rounded-md border border-slate-300 px-2 py-1 text-xs shadow-sm focus:border-slate-500 focus:outline-none focus:ring-2 focus:ring-slate-200',
-      });
-      ['NA', 'AS', 'AN', 'AE'].forEach((optionValue) => {
-        const option = createElement('option', { attrs: { value: optionValue }, text: optionValue });
-        if (optionValue === currentValue) option.selected = true;
-        select.appendChild(option);
-      });
-      select.addEventListener('change', (event) => {
-        const value = event.currentTarget.value;
-        const activitatId = findActivitatForCA(state, caId);
-        if (!activitatId) {
-          Toast('Cap activitat està vinculada a aquest CA.', 'warn');
-          event.currentTarget.value = currentValue;
-          return;
-        }
-        try {
-          appContext.store.registraAvaluacioComp({
-            alumneId,
-            activitatId,
-            caId,
-            valorQuali: value,
-          });
-          Toast('Valor registrat.', 'success');
-          dirtyFlags.view = true;
-          scheduleRender('rubrica-update');
-        } catch (error) {
-          Toast(`Error en registrar la rúbrica: ${error.message || error}`, 'error');
-        }
-      });
-      clearElement(cell);
-      cell.appendChild(select);
-    });
-  });
-  container.appendChild(table);
+  container.appendChild(gridSection);
 
   const summaryRow = createElement('div', {
     className: 'flex flex-wrap gap-3 rounded-md border border-slate-200 bg-slate-50 px-4 py-3 text-xs text-slate-600',
@@ -1480,14 +2593,15 @@ function renderRubrica(container, state) {
   tableData.cas.forEach((caId) => {
     const values = tableData.alumnes.map((alumneId) => tableData.values?.[alumneId]?.[caId]?.valueNumRounded ?? 0);
     const average = values.reduce((acc, num) => acc + num, 0) / (values.length || 1);
-    summaryRow.appendChild(
-      createElement('span', {
-        className: 'inline-flex items-center gap-2 rounded-md bg-white px-3 py-1 font-medium shadow-sm',
-        text: `${getCAName(state, caId)} · Mitjana ${formatNumber(average, 2)}`,
-      }),
-    );
+    const badge = createElement('span', {
+      className: 'inline-flex items-center gap-2 rounded-md bg-white px-3 py-1 font-medium shadow-sm',
+      text: `${getCAName(state, caId)} · Mitjana ${formatNumber(average, 2)}`,
+    });
+    summaryBadges.set(caId, badge);
+    summaryRow.appendChild(badge);
   });
   container.appendChild(summaryRow);
+  ensureLucide();
 }
 
 function renderCalendari(container, state) {
@@ -3167,6 +4281,52 @@ function renderConfiguracio(container, state) {
     }
   });
   container.appendChild(form);
+
+  const devMode = typeof window !== 'undefined' && window.__DEV__;
+  if (devMode && typeof __selfTest === 'function') {
+    const details = createElement('details', {
+      className:
+        'rounded-lg border border-dashed border-emerald-300 bg-emerald-50/60 p-4 text-sm text-slate-700',
+    });
+    const summary = createElement('summary', {
+      className: 'cursor-pointer text-base font-semibold text-emerald-700 focus:outline-none focus:ring-2 focus:ring-emerald-400',
+      text: 'Proves',
+    });
+    const description = createElement('p', {
+      className: 'mt-2 text-sm text-slate-600',
+      text: 'Executa una comprovació interna de càlculs competencials. El resultat detallat s\'escriu a la consola.',
+    });
+    const actionsRow = createElement('div', { className: 'mt-4 flex items-center gap-3' });
+    const runBtn = createElement('button', {
+      className:
+        'inline-flex items-center gap-2 rounded-md bg-emerald-600 px-3 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-emerald-500 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-600',
+      text: 'Executa self-test',
+    });
+    const status = createElement('span', {
+      className: 'text-sm text-slate-600',
+      text: '',
+    });
+    actionsRow.append(runBtn, status);
+    details.append(summary, description, actionsRow);
+    container.appendChild(details);
+
+    runBtn.addEventListener('click', (event) => {
+      event.preventDefault();
+      try {
+        const result = __selfTest();
+        const now = new Date();
+        status.textContent = `Darrera execució: ${now.toLocaleString()}`;
+        Toast('Self-test completat. Consulta la consola per als detalls.', 'success');
+        if (result) {
+          status.textContent += ` • ${Object.keys(result.cas || {}).length} CA / ${Object.keys(result.ces || {}).length} CE validats.`;
+        }
+      } catch (error) {
+        console.error('Error en self-test', error);
+        status.textContent = `Error: ${error?.message || error}`;
+        Toast(`Error en self-test: ${error?.message || error}`, 'error');
+      }
+    });
+  }
 }
 
 function renderCurrentView(container, state) {
@@ -3316,6 +4476,7 @@ function subscribeEvents() {
   events.addEventListener('save:ok', () => {
     updateStatus('emerald', 'Local');
     Toast('Canvis desats correctament.', 'success');
+    flushRubricaPending('success');
     if (uiState.calendari.pendingSave) {
       uiState.calendari.pendingSave = false;
       dirtyFlags.view = true;
@@ -3325,6 +4486,7 @@ function subscribeEvents() {
   events.addEventListener('save:warning', () => {
     updateStatus('amber', 'Avís');
     Toast('S\'ha desat amb advertiments.', 'warn');
+    flushRubricaPending('warn', 'Desat amb advertiments.');
     if (uiState.calendari.pendingSave) {
       uiState.calendari.pendingSave = false;
       dirtyFlags.view = true;
@@ -3334,6 +4496,7 @@ function subscribeEvents() {
   events.addEventListener('save:error', (event) => {
     updateStatus('rose', 'Error');
     Toast(`Error en desar: ${event.detail?.error?.message || 'desconegut'}`, 'error');
+    flushRubricaPending('error', event.detail?.error?.message || 'Error en desar.');
   });
   events.addEventListener('fs:connected', () => {
     uiState.header.fsConnected = true;
@@ -3348,6 +4511,16 @@ function subscribeEvents() {
   events.addEventListener('fs:error', (event) => {
     updateStatus('rose', 'Error');
     Toast(`Error de fitxer: ${event.detail?.error?.message || 'desconegut'}`, 'error');
+  });
+  events.addEventListener('conflict:detected', () => {
+    uiState.rubrica.conflictActive = true;
+    dirtyFlags.view = true;
+    scheduleRender('conflict-detected');
+  });
+  events.addEventListener('conflict:resolved', () => {
+    uiState.rubrica.conflictActive = false;
+    dirtyFlags.view = true;
+    scheduleRender('conflict-resolved');
   });
   events.addEventListener('lock:acquired', () => {
     uiState.header.locked = true;
