@@ -134,13 +134,86 @@ function getAssignatura(state, assignaturaId) {
   return assignatura;
 }
 
+const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/u;
+
+function toISODate(value) {
+  if (!value && value !== 0) return null;
+  if (typeof value === 'string') {
+    if (ISO_DATE_RE.test(value)) return value;
+    const parsed = new Date(value);
+    if (Number.isNaN(parsed.getTime())) return null;
+    return parsed.toISOString().slice(0, 10);
+  }
+  if (value instanceof Date) {
+    if (Number.isNaN(value.getTime())) return null;
+    return value.toISOString().slice(0, 10);
+  }
+  if (typeof value === 'number') {
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return null;
+    return date.toISOString().slice(0, 10);
+  }
+  return null;
+}
+
+function toUTCDateAtStartOfDay(value) {
+  const iso = typeof value === 'string' && ISO_DATE_RE.test(value) ? value : toISODate(value);
+  if (!iso) return null;
+  const parsed = new Date(`${iso}T00:00:00Z`);
+  if (Number.isNaN(parsed.getTime())) return null;
+  return parsed;
+}
+
+function getUTCWeekday(value) {
+  const date = toUTCDateAtStartOfDay(value);
+  if (!date) return null;
+  return date.getUTCDay();
+}
+
+function compareISODate(a, b) {
+  if (!a && !b) return 0;
+  if (!a) return -1;
+  if (!b) return 1;
+  if (a === b) return 0;
+  return a < b ? -1 : 1;
+}
+
+function ensureArray(value) {
+  return Array.isArray(value) ? value : [];
+}
+
+function normalizeFestiu(entry) {
+  if (!entry && entry !== 0) return null;
+  if (typeof entry === 'string') {
+    const dataISO = toISODate(entry);
+    if (!dataISO) return null;
+    return { dataISO, motiu: '' };
+  }
+  if (typeof entry === 'object') {
+    const dataISO = toISODate(entry.dataISO || entry.date || entry.data);
+    if (!dataISO) return null;
+    return { dataISO, motiu: entry.motiu ? String(entry.motiu) : '' };
+  }
+  return null;
+}
+
+function normalizeExcepcio(entry) {
+  if (!entry || typeof entry !== 'object') return null;
+  const dataISO = toISODate(entry.dataISO || entry.date || entry.data);
+  if (!dataISO) return null;
+  return {
+    dataISO,
+    motiu: entry.motiu ? String(entry.motiu) : '',
+  };
+}
+
 function getTrimestreRange(state, assignaturaId, trimestreId) {
   if (!trimestreId) return null;
-  const calendaris = Object.values(state.calendaris.byId).filter(
+  const calendaris = Object.values(state.calendaris.byId || {}).filter(
     (cal) => cal.assignaturaId === assignaturaId,
   );
   for (const calendari of calendaris) {
-    for (const trimestre of calendari.trimestres || []) {
+    for (const trimestre of ensureArray(calendari.trimestres)) {
       if (trimestre.id === trimestreId) {
         return { inici: trimestre.tInici, fi: trimestre.tFi };
       }
@@ -870,6 +943,333 @@ export function createStore(initialState = createEmptyState()) {
     return id;
   }
 
+  function getCalendari(assignaturaId, { createIfMissing = false } = {}) {
+    let calendari = state.calendaris.allIds
+      .map((id) => state.calendaris.byId[id])
+      .find((cal) => cal.assignaturaId === assignaturaId);
+    if (!calendari && createIfMissing) {
+      const id = createId('calendari');
+      calendari = {
+        id,
+        assignaturaId,
+        cursInici: null,
+        cursFi: null,
+        diesSetmanals: [],
+        trimestres: [],
+        festius: [],
+        excepcions: [],
+        horariVersions: [],
+        horariActivaId: null,
+      };
+      addToCollection(state, 'calendaris', calendari);
+    }
+    if (calendari) {
+      calendari.trimestres = ensureArray(calendari.trimestres);
+      calendari.festius = ensureArray(calendari.festius).map((festiu) => normalizeFestiu(festiu)).filter(Boolean);
+      calendari.excepcions = ensureArray(calendari.excepcions)
+        .map((excepcio) => normalizeExcepcio(excepcio))
+        .filter(Boolean);
+      calendari.horariVersions = ensureArray(calendari.horariVersions).map((versio) => ({
+        id: versio.id || createId('horariVersio'),
+        effectiveFrom: toISODate(versio.effectiveFrom),
+        diesSetmanals: ensureArray(versio.diesSetmanals).map((d) => Number(d)).filter((d) => Number.isInteger(d)),
+      }));
+    }
+    return calendari || null;
+  }
+
+  function updateCalendari(assignaturaId, updater, meta = {}) {
+    applyMutation(meta, () => {
+      const calendari = getCalendari(assignaturaId, { createIfMissing: true });
+      updater(calendari);
+      state.calendaris.byId[calendari.id] = { ...calendari };
+    });
+  }
+
+  function setCursRange(assignaturaId, { inici, fi }) {
+    updateCalendari(
+      assignaturaId,
+      (calendari) => {
+        const iniciISO = inici ? toISODate(inici) : null;
+        const fiISO = fi ? toISODate(fi) : null;
+        if (iniciISO && fiISO && compareISODate(iniciISO, fiISO) === 1) {
+          throw new Error('La data de fi ha de ser posterior o igual a la data d\'inici');
+        }
+        calendari.cursInici = iniciISO;
+        calendari.cursFi = fiISO;
+      },
+      { action: 'setCursRange' },
+    );
+  }
+
+  function setDiesSetmanals(assignaturaId, dies) {
+    updateCalendari(
+      assignaturaId,
+      (calendari) => {
+        const normalized = ensureArray(dies)
+          .map((d) => Number(d))
+          .filter((d) => Number.isInteger(d) && d >= 0 && d <= 6);
+        const unique = Array.from(new Set(normalized)).sort((a, b) => a - b);
+        calendari.diesSetmanals = unique;
+      },
+      { action: 'setDiesSetmanals' },
+    );
+  }
+
+  function addTrimestre(assignaturaId, data) {
+    const id = data.id || createId('trimestre');
+    updateCalendari(
+      assignaturaId,
+      (calendari) => {
+        const tInici = toISODate(data.tInici);
+        const tFi = toISODate(data.tFi);
+        if (!tInici || !tFi) {
+          throw new Error('Les dates del trimestre han de ser vàlides');
+        }
+        if (compareISODate(tInici, tFi) === 1) {
+          throw new Error('La data de fi del trimestre ha de ser posterior o igual a la data d\'inici');
+        }
+        const existingIndex = calendari.trimestres.findIndex((t) => t.id === id);
+        const trimestre = { id, tInici, tFi, nom: data.nom || data.name || data.label || null };
+        if (existingIndex >= 0) {
+          calendari.trimestres[existingIndex] = trimestre;
+        } else {
+          calendari.trimestres.push(trimestre);
+        }
+        calendari.trimestres.sort((a, b) => compareISODate(a.tInici, b.tInici));
+      },
+      { action: 'addTrimestre' },
+    );
+    return id;
+  }
+
+  function removeTrimestre(assignaturaId, trimestreId) {
+    updateCalendari(
+      assignaturaId,
+      (calendari) => {
+        calendari.trimestres = calendari.trimestres.filter((t) => t.id !== trimestreId);
+      },
+      { action: 'removeTrimestre' },
+    );
+  }
+
+  function addFestius(assignaturaId, dates) {
+    updateCalendari(
+      assignaturaId,
+      (calendari) => {
+        const festius = ensureArray(dates)
+          .map((entry) => normalizeFestiu(entry))
+          .filter(Boolean);
+        const byDate = new Map(calendari.festius.map((festiu) => [festiu.dataISO, festiu]));
+        festius.forEach((festiu) => {
+          byDate.set(festiu.dataISO, { ...byDate.get(festiu.dataISO), ...festiu });
+        });
+        calendari.festius = Array.from(byDate.values()).sort((a, b) => compareISODate(a.dataISO, b.dataISO));
+      },
+      { action: 'addFestius' },
+    );
+  }
+
+  function removeFestius(assignaturaId, dates) {
+    const datesSet = new Set(
+      ensureArray(dates)
+        .map((entry) => (typeof entry === 'string' ? toISODate(entry) : toISODate(entry?.dataISO)))
+        .filter(Boolean),
+    );
+    updateCalendari(
+      assignaturaId,
+      (calendari) => {
+        if (!datesSet.size) return;
+        calendari.festius = calendari.festius.filter((festiu) => !datesSet.has(festiu.dataISO));
+      },
+      { action: 'removeFestius' },
+    );
+  }
+
+  function addExcepcions(assignaturaId, items) {
+    updateCalendari(
+      assignaturaId,
+      (calendari) => {
+        const map = new Map(calendari.excepcions.map((ex) => [ex.dataISO, ex]));
+        ensureArray(items)
+          .map((item) => normalizeExcepcio(item))
+          .filter(Boolean)
+          .forEach((item) => {
+            map.set(item.dataISO, { ...map.get(item.dataISO), ...item });
+          });
+        calendari.excepcions = Array.from(map.values()).sort((a, b) => compareISODate(a.dataISO, b.dataISO));
+      },
+      { action: 'addExcepcions' },
+    );
+  }
+
+  function removeExcepcio(assignaturaId, dataISO) {
+    const normalized = toISODate(dataISO);
+    if (!normalized) return;
+    updateCalendari(
+      assignaturaId,
+      (calendari) => {
+        calendari.excepcions = calendari.excepcions.filter((item) => item.dataISO !== normalized);
+      },
+      { action: 'removeExcepcio' },
+    );
+  }
+
+  function addHorariVersio(assignaturaId, data) {
+    const id = data.id || createId('horariVersio');
+    updateCalendari(
+      assignaturaId,
+      (calendari) => {
+        const effectiveFrom = toISODate(data.effectiveFrom);
+        if (!effectiveFrom) {
+          throw new Error('La versió d\'horari necessita una data d\'entrada en vigor vàlida');
+        }
+        const dies = ensureArray(data.diesSetmanals)
+          .map((d) => Number(d))
+          .filter((d) => Number.isInteger(d) && d >= 0 && d <= 6);
+        if (!dies.length) {
+          throw new Error('La versió d\'horari ha de contenir almenys un dia lectiu');
+        }
+        const versio = { id, effectiveFrom, diesSetmanals: Array.from(new Set(dies)).sort((a, b) => a - b) };
+        const index = calendari.horariVersions.findIndex((v) => v.id === id);
+        if (index >= 0) {
+          calendari.horariVersions[index] = versio;
+        } else {
+          calendari.horariVersions.push(versio);
+        }
+        calendari.horariVersions.sort((a, b) => compareISODate(a.effectiveFrom, b.effectiveFrom));
+      },
+      { action: 'addHorariVersio' },
+    );
+    return id;
+  }
+
+  function activateHorariVersio(assignaturaId, id) {
+    updateCalendari(
+      assignaturaId,
+      (calendari) => {
+        if (!calendari.horariVersions.some((versio) => versio.id === id)) {
+          throw new Error(`Versió d'horari ${id} no trobada`);
+        }
+        calendari.horariActivaId = id;
+      },
+      { action: 'activateHorariVersio' },
+    );
+  }
+
+  function getActiveSchedule(assignaturaId, date) {
+    const calendari = getCalendari(assignaturaId);
+    if (!calendari) return null;
+    const isoDate = toISODate(date);
+    if (!isoDate) return null;
+    const candidates = calendari.horariVersions.filter((versio) => !versio.effectiveFrom || versio.effectiveFrom <= isoDate);
+    let selected = null;
+    const preferredId = calendari.horariActivaId;
+    if (preferredId) {
+      selected = candidates.find((versio) => versio.id === preferredId) || null;
+    }
+    if (!selected) {
+      for (const versio of candidates) {
+        if (!selected || compareISODate(versio.effectiveFrom, selected.effectiveFrom) === 1) {
+          selected = versio;
+        }
+      }
+    }
+    if (selected) {
+      return {
+        diesSetmanals: Array.from(new Set(selected.diesSetmanals)).sort((a, b) => a - b),
+        versioId: selected.id || null,
+      };
+    }
+    if (calendari.diesSetmanals?.length) {
+      return {
+        diesSetmanals: Array.from(new Set(calendari.diesSetmanals)).sort((a, b) => a - b),
+        versioId: null,
+      };
+    }
+    return null;
+  }
+
+  function evaluateLectiu(assignaturaId, date) {
+    const isoDate = toISODate(date);
+    if (!isoDate) {
+      return { lectiu: false, motiu: 'Data invàlida' };
+    }
+    const calendari = getCalendari(assignaturaId);
+    if (!calendari) {
+      return { lectiu: false, motiu: 'Sense calendari configurat' };
+    }
+    if (calendari.cursInici && compareISODate(isoDate, calendari.cursInici) === -1) {
+      return { lectiu: false, motiu: 'Fora del període lectiu (abans d\'inici)' };
+    }
+    if (calendari.cursFi && compareISODate(isoDate, calendari.cursFi) === 1) {
+      return { lectiu: false, motiu: 'Fora del període lectiu (després de fi)' };
+    }
+    const festiu = calendari.festius.find((item) => item.dataISO === isoDate);
+    if (festiu) {
+      return { lectiu: false, motiu: festiu.motiu || 'Festiu' };
+    }
+    const excepcio = calendari.excepcions.find((item) => item.dataISO === isoDate);
+    if (excepcio) {
+      return { lectiu: false, motiu: excepcio.motiu || 'Excepció' };
+    }
+    const schedule = getActiveSchedule(assignaturaId, isoDate);
+    if (!schedule || !schedule.diesSetmanals.length) {
+      return { lectiu: false, motiu: 'Sense horari actiu' };
+    }
+    const weekday = getUTCWeekday(isoDate);
+    if (weekday === null) {
+      return { lectiu: false, motiu: 'Data invàlida' };
+    }
+    const versioId = typeof schedule.versioId === 'string' && schedule.versioId.trim().length
+      ? schedule.versioId
+      : null;
+    if (!schedule.diesSetmanals.includes(weekday)) {
+      const result = { lectiu: false, motiu: 'No hi ha classe aquest dia' };
+      if (versioId) {
+        result.versioId = versioId;
+      }
+      return result;
+    }
+    return versioId ? { lectiu: true, versioId } : { lectiu: true };
+  }
+
+  function isLectiu(assignaturaId, date) {
+    return evaluateLectiu(assignaturaId, date).lectiu;
+  }
+
+  function listSessions(assignaturaId, { from, to }) {
+    const fromISO = toISODate(from);
+    const toISO = toISODate(to);
+    if (!fromISO || !toISO) return [];
+    if (compareISODate(fromISO, toISO) === 1) return [];
+    const sessions = [];
+    const cursor = toUTCDateAtStartOfDay(fromISO);
+    const end = toUTCDateAtStartOfDay(toISO);
+    if (!cursor || !end) return [];
+    while (cursor.getTime() <= end.getTime()) {
+      const iso = cursor.toISOString().slice(0, 10);
+      if (isLectiu(assignaturaId, cursor)) {
+        sessions.push({ dateISO: iso, weekday: cursor.getUTCDay() });
+      }
+      cursor.setUTCDate(cursor.getUTCDate() + 1);
+    }
+    return sessions;
+  }
+
+  function listSessionsTrimestre(assignaturaId, trimestreId) {
+    const calendari = getCalendari(assignaturaId);
+    if (!calendari) return [];
+    const trimestre = ensureArray(calendari.trimestres).find((t) => t.id === trimestreId);
+    if (!trimestre) return [];
+    return listSessions(assignaturaId, { from: trimestre.tInici, to: trimestre.tFi });
+  }
+
+  function simulateDay(assignaturaId, date) {
+    const result = evaluateLectiu(assignaturaId, date);
+    return result;
+  }
+
   function linkCAtoActivitat(activitatId, caId, pes_ca) {
     const id = createId('activitatCA');
     applyMutation({ action: 'linkCAtoActivitat' }, () => {
@@ -972,6 +1372,21 @@ export function createStore(initialState = createEmptyState()) {
     registraAvaluacioNum,
     registraAssistencia,
     registraIncidencia,
+    setCursRange,
+    setDiesSetmanals,
+    addTrimestre,
+    removeTrimestre,
+    addFestius,
+    removeFestius,
+    addExcepcions,
+    removeExcepcio,
+    addHorariVersio,
+    activateHorariVersio,
+    getActiveSchedule: (...args) => getActiveSchedule(...args),
+    isLectiu: (...args) => isLectiu(...args),
+    listSessions: (...args) => listSessions(...args),
+    listSessionsTrimestre: (...args) => listSessionsTrimestre(...args),
+    simulateDay: (...args) => simulateDay(...args),
     computeCAForAlumne: (...args) => computeCAForAlumne(state, ...args),
     computeCEForAlumne: (...args) => computeCEForAlumne(state, ...args),
     computeTaulaCompetencial: (...args) => computeTaulaCompetencial(state, ...args),

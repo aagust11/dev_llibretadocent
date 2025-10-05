@@ -66,8 +66,39 @@ const uiState = {
     selectedTab: 'resum',
     filtreAssignatura: 'totes',
     filtrePeriode: 'tot',
+    filtreTrimestre: '',
+    rangInici: '',
+    rangFi: '',
+  },
+  calendari: {
+    selectedAssignatura: null,
+    simulatorDate: '',
+    simulatorResult: null,
+    importTarget: 'festius',
+    pendingSave: false,
+    newTrimestre: { tInici: '', tFi: '' },
+    newVersio: { effectiveFrom: '', dies: new Set([1, 2, 3, 4, 5]) },
+    exportMode: 'curs',
+    exportFrom: '',
+    exportTo: '',
+    exportSummary: '',
+    exportLocation: '',
+    viewMonth: null,
   },
 };
+
+const CALENDAR_MUTATIONS = new Set([
+  'setCursRange',
+  'setDiesSetmanals',
+  'addTrimestre',
+  'removeTrimestre',
+  'addFestius',
+  'removeFestius',
+  'addExcepcions',
+  'removeExcepcio',
+  'addHorariVersio',
+  'activateHorariVersio',
+]);
 
 let toastContainer = null;
 let modalBackdrop = null;
@@ -142,6 +173,126 @@ function formatDate(value) {
   if (!value) return '';
   if (!appContext?.i18n) return new Date(value).toLocaleDateString('ca-ES');
   return appContext.i18n.formatDateCAT(value);
+}
+
+const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/u;
+
+function toISODateLocal(value) {
+  if (!value && value !== 0) return '';
+  if (typeof value === 'string') {
+    if (ISO_DATE_RE.test(value)) return value;
+    const parsed = new Date(value);
+    if (Number.isNaN(parsed.getTime())) return '';
+    return parsed.toISOString().slice(0, 10);
+  }
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  return date.toISOString().slice(0, 10);
+}
+
+function downloadBlob(blob, filename) {
+  if (!blob) return;
+  const url = URL.createObjectURL(blob);
+  const link = createElement('a', { attrs: { href: url, download: filename } });
+  getDocument()?.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
+function getCalendariForAssignatura(state, assignaturaId) {
+  if (!assignaturaId) return null;
+  const calendaris = state.calendaris?.allIds || [];
+  const calendari = calendaris
+    .map((id) => state.calendaris.byId[id])
+    .find((cal) => cal.assignaturaId === assignaturaId);
+  if (!calendari) {
+    return {
+      assignaturaId,
+      cursInici: '',
+      cursFi: '',
+      diesSetmanals: [],
+      trimestres: [],
+      festius: [],
+      excepcions: [],
+      horariVersions: [],
+      horariActivaId: null,
+    };
+  }
+  return {
+    ...calendari,
+    trimestres: (calendari.trimestres || []).map((t) => ({
+      ...t,
+      tInici: toISODateLocal(t.tInici),
+      tFi: toISODateLocal(t.tFi),
+    })),
+    festius: (calendari.festius || []).map((festiu) => ({
+      dataISO: toISODateLocal(festiu.dataISO || festiu.data),
+      motiu: festiu.motiu || '',
+    })),
+    excepcions: (calendari.excepcions || []).map((excepcio) => ({
+      dataISO: toISODateLocal(excepcio.dataISO || excepcio.data),
+      motiu: excepcio.motiu || '',
+    })),
+    horariVersions: (calendari.horariVersions || []).map((versio) => ({
+      ...versio,
+      effectiveFrom: toISODateLocal(versio.effectiveFrom),
+      diesSetmanals: Array.from(new Set(versio.diesSetmanals || [])).sort((a, b) => a - b),
+    })),
+  };
+}
+
+const WEEKDAY_ORDER = [1, 2, 3, 4, 5, 6, 0];
+const WEEKDAY_LABEL = {
+  0: 'Dg',
+  1: 'Dl',
+  2: 'Dt',
+  3: 'Dc',
+  4: 'Dj',
+  5: 'Dv',
+  6: 'Ds',
+};
+
+function formatDiesSetmanals(dies) {
+  if (!dies?.length) return 'Cap dia definit';
+  const ordered = Array.from(new Set(dies)).sort((a, b) => WEEKDAY_ORDER.indexOf(a) - WEEKDAY_ORDER.indexOf(b));
+  return ordered.map((dia) => WEEKDAY_LABEL[dia] || dia).join(', ');
+}
+
+function rangesOverlap(aInici, aFi, bInici, bFi) {
+  if (!aInici || !aFi || !bInici || !bFi) return false;
+  return !(aFi < bInici || aInici > bFi);
+}
+
+function validateTrimestreRange(trimestres, currentId, tInici, tFi) {
+  if (!tInici || !tFi) {
+    return 'Les dues dates són obligatòries.';
+  }
+  if (tFi < tInici) {
+    return 'La data de fi ha de ser posterior o igual a la data d\'inici.';
+  }
+  for (const trimestre of trimestres) {
+    if (trimestre.id === currentId) continue;
+    if (rangesOverlap(tInici, tFi, trimestre.tInici, trimestre.tFi)) {
+      return `El rang se solapa amb ${trimestre.nom || trimestre.id}.`;
+    }
+  }
+  return '';
+}
+
+function createBadge(text, tone = 'slate') {
+  const palette = {
+    slate: 'bg-slate-100 text-slate-700',
+    emerald: 'bg-emerald-100 text-emerald-700',
+    sky: 'bg-sky-100 text-sky-700',
+    amber: 'bg-amber-100 text-amber-700',
+    rose: 'bg-rose-100 text-rose-700',
+  };
+  const classes = palette[tone] || palette.slate;
+  return createElement('span', {
+    className: `inline-flex items-center gap-1 rounded-full px-3 py-1 text-xs font-semibold ${classes}`,
+    text,
+  });
 }
 
 let toastId = 0;
@@ -1099,12 +1250,15 @@ function renderAlumnes(container, state) {
 }
 
 function getTrimestresForAssignatura(state, assignaturaId) {
-  const set = new Set();
-  state.calendaris?.allIds
-    ?.map((id) => state.calendaris.byId[id])
-    .filter((cal) => cal.assignaturaId === assignaturaId)
-    .forEach((cal) => (cal.trimestres || []).forEach((trim) => set.add(trim.id)));
-  return Array.from(set);
+  if (!assignaturaId) return [];
+  const calendari = getCalendariForAssignatura(state, assignaturaId);
+  if (!calendari) return [];
+  return (calendari.trimestres || []).map((trim) => ({
+    id: trim.id,
+    nom: trim.nom || trim.id,
+    tInici: trim.tInici,
+    tFi: trim.tFi,
+  }));
 }
 
 function getAlumneName(state, alumneId) {
@@ -1181,14 +1335,24 @@ function renderRubrica(container, state) {
   );
 
   const trimestres = getTrimestresForAssignatura(state, uiState.rubrica.selectedAssignatura);
+  if (
+    uiState.rubrica.selectedTrimestre &&
+    !trimestres.some((trim) => trim.id === uiState.rubrica.selectedTrimestre)
+  ) {
+    uiState.rubrica.selectedTrimestre = null;
+  }
   const trimestreSelect = createElement('select', {
     className:
       'w-full rounded-md border border-slate-300 px-3 py-2 text-sm shadow-sm focus:border-slate-500 focus:outline-none focus:ring-2 focus:ring-slate-200 lg:w-48',
   });
   trimestreSelect.appendChild(createElement('option', { attrs: { value: '' }, text: 'Tots els trimestres' }));
-  trimestres.forEach((trimId) => {
-    const option = createElement('option', { attrs: { value: trimId }, text: trimId });
-    if (uiState.rubrica.selectedTrimestre === trimId) option.selected = true;
+  trimestres.forEach((trim) => {
+    const labelRange = trim.tInici && trim.tFi ? `${formatDate(trim.tInici)} – ${formatDate(trim.tFi)}` : 'Dates pendents';
+    const option = createElement('option', {
+      attrs: { value: trim.id },
+      text: `${trim.nom} · ${labelRange}`,
+    });
+    if (uiState.rubrica.selectedTrimestre === trim.id) option.selected = true;
     trimestreSelect.appendChild(option);
   });
   trimestreSelect.addEventListener('change', (event) => {
@@ -1329,59 +1493,1248 @@ function renderRubrica(container, state) {
 function renderCalendari(container, state) {
   clearElement(container);
   container.classList.add('space-y-6');
-  const calendaris = state.calendaris?.allIds?.map((id) => state.calendaris.byId[id]) || [];
-  const header = createElement('div', {
-    className: 'flex items-center justify-between',
-    children: [
-      createElement('h4', { className: 'text-lg font-semibold text-slate-900', text: 'Versions d\'horari i calendari' }),
-      createElement('span', {
-        className: 'rounded-full bg-slate-200 px-3 py-1 text-xs font-semibold text-slate-700',
-        text: `${calendaris.length} calendaris`,
-      }),
-    ],
-  });
-  container.appendChild(header);
-  if (!calendaris.length) {
+  const assignatures = state.assignatures?.allIds?.map((id) => state.assignatures.byId[id]) || [];
+  if (!assignatures.length) {
     container.appendChild(
       createElement('p', {
         className: 'rounded-md border border-dashed border-slate-300 bg-slate-50 px-4 py-6 text-sm text-slate-600',
-        text: 'Encara no s\'ha configurat cap calendari.',
+        text: 'Crea una assignatura per començar a configurar el calendari.',
       }),
     );
     return;
   }
-  const list = createElement('div', { className: 'space-y-4' });
-  calendaris.forEach((cal) => {
-    list.appendChild(
-      createElement('article', {
-        className: 'space-y-2 rounded-lg border border-slate-200 bg-white p-4 shadow-sm',
+
+  if (!uiState.calendari.selectedAssignatura || !assignatures.some((a) => a.id === uiState.calendari.selectedAssignatura)) {
+    uiState.calendari.selectedAssignatura = assignatures[0].id;
+  }
+
+  const assignatura = assignatures.find((a) => a.id === uiState.calendari.selectedAssignatura);
+  const calendari = getCalendariForAssignatura(state, uiState.calendari.selectedAssignatura);
+  const trimestres = getTrimestresForAssignatura(state, uiState.calendari.selectedAssignatura);
+
+  if (!uiState.calendari.exportSummary && assignatura) {
+    uiState.calendari.exportSummary = `${assignatura.nom || assignatura.id} (classe)`;
+  }
+  if (!uiState.calendari.viewMonth) {
+    const now = new Date();
+    const firstDay = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+    uiState.calendari.viewMonth = toISODateLocal(firstDay);
+  }
+
+  const header = createElement('div', {
+    className: 'flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between',
+  });
+  const titleWrapper = createElement('div', { className: 'flex items-center gap-3' });
+  const title = createElement('h4', { className: 'text-lg font-semibold text-slate-900', text: 'Calendari i horaris' });
+  titleWrapper.appendChild(title);
+  if (uiState.calendari.pendingSave) {
+    titleWrapper.appendChild(
+      createElement('span', {
+        className: 'text-xl leading-none text-emerald-500',
+        text: '•',
+        attrs: { role: 'status', 'aria-label': 'Canvis pendents de desar' },
+      }),
+    );
+  }
+  header.appendChild(titleWrapper);
+
+  const assignaturaSelect = createElement('select', {
+    className:
+      'w-full rounded-md border border-slate-300 px-3 py-2 text-sm shadow-sm focus:border-slate-500 focus:outline-none focus:ring-2 focus:ring-slate-200 lg:w-80',
+  });
+  assignatures.forEach((item) => {
+    const option = createElement('option', { attrs: { value: item.id }, text: item.nom || item.id });
+    if (item.id === uiState.calendari.selectedAssignatura) option.selected = true;
+    assignaturaSelect.appendChild(option);
+  });
+  assignaturaSelect.addEventListener('change', (event) => {
+    uiState.calendari.selectedAssignatura = event.currentTarget.value;
+    uiState.calendari.simulatorResult = null;
+    dirtyFlags.view = true;
+    scheduleRender('calendar-assignatura');
+  });
+  header.appendChild(
+    createElement('label', {
+      className: 'flex flex-col gap-2 text-sm font-medium text-slate-700',
+      children: [createElement('span', { text: 'Assignatura' }), assignaturaSelect],
+    }),
+  );
+  container.appendChild(header);
+
+  if (!assignatura) {
+    container.appendChild(
+      createElement('p', {
+        className: 'rounded-md border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-700',
+        text: 'Selecciona una assignatura per gestionar-ne el calendari.',
+      }),
+    );
+    return;
+  }
+
+  container.appendChild(renderCalendariRangeSection(assignatura, calendari));
+  container.appendChild(renderDiesSetmanalsSection(assignatura, calendari));
+  container.appendChild(renderHorariVersionsSection(assignatura, calendari));
+  container.appendChild(renderTrimestresSection(assignatura, calendari));
+  container.appendChild(renderFestiusSection(assignatura, calendari));
+  container.appendChild(renderExcepcionsSection(assignatura, calendari));
+  container.appendChild(renderSimuladorSection(assignatura, calendari));
+  container.appendChild(renderICSExportSection(assignatura, calendari, trimestres));
+  container.appendChild(renderCalendariPreview(assignatura, calendari));
+}
+
+function renderCalendariRangeSection(assignatura, calendari) {
+  const section = createElement('section', {
+    className: 'space-y-3 rounded-lg border border-slate-200 bg-white p-4 shadow-sm',
+  });
+  section.appendChild(
+    createElement('header', {
+      className: 'flex items-center justify-between',
+      children: [
+        createElement('h5', { className: 'text-sm font-semibold uppercase tracking-wide text-slate-500', text: 'Període del curs' }),
+        createBadge(
+          calendari.cursInici && calendari.cursFi
+            ? `${formatDate(calendari.cursInici)} – ${formatDate(calendari.cursFi)}`
+            : 'Sense dates',
+          calendari.cursInici && calendari.cursFi ? 'emerald' : 'slate',
+        ),
+      ],
+    }),
+  );
+  const grid = createElement('div', { className: 'grid gap-4 sm:grid-cols-2' });
+  const errorMsg = createElement('p', {
+    className: 'hidden text-xs font-medium text-rose-600',
+    attrs: { 'aria-live': 'polite' },
+  });
+  const iniciInput = createElement('input', {
+    className:
+      'w-full rounded-md border border-slate-300 px-3 py-2 text-sm shadow-sm focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-200',
+    attrs: { type: 'date', value: calendari.cursInici || '' },
+  });
+  const fiInput = createElement('input', {
+    className:
+      'w-full rounded-md border border-slate-300 px-3 py-2 text-sm shadow-sm focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-200',
+    attrs: { type: 'date', value: calendari.cursFi || '' },
+  });
+
+  const showError = (message) => {
+    if (!message) {
+      errorMsg.classList.add('hidden');
+      errorMsg.textContent = '';
+      return;
+    }
+    errorMsg.textContent = message;
+    errorMsg.classList.remove('hidden');
+  };
+
+  const handleChange = () => {
+    const iniciISO = toISODateLocal(iniciInput.value) || null;
+    const fiISO = toISODateLocal(fiInput.value) || null;
+    if (iniciISO && fiISO && fiISO < iniciISO) {
+      showError('La data de fi ha de ser posterior o igual a la data d\'inici.');
+      return;
+    }
+    showError('');
+    try {
+      appContext.store.setCursRange(assignatura.id, { inici: iniciISO, fi: fiISO });
+    } catch (error) {
+      showError(error.message || 'No s\'ha pogut actualitzar el període.');
+      iniciInput.value = calendari.cursInici || '';
+      fiInput.value = calendari.cursFi || '';
+    }
+  };
+
+  iniciInput.addEventListener('change', handleChange);
+  fiInput.addEventListener('change', handleChange);
+
+  grid.append(
+    createElement('label', {
+      className: 'flex flex-col gap-2 text-sm font-medium text-slate-700',
+      children: [createElement('span', { text: 'Data d\'inici' }), iniciInput],
+    }),
+    createElement('label', {
+      className: 'flex flex-col gap-2 text-sm font-medium text-slate-700',
+      children: [createElement('span', { text: 'Data de fi' }), fiInput],
+    }),
+  );
+  section.append(grid, errorMsg);
+  return section;
+}
+
+function renderDiesSetmanalsSection(assignatura, calendari) {
+  const section = createElement('section', {
+    className: 'space-y-3 rounded-lg border border-slate-200 bg-white p-4 shadow-sm',
+  });
+  section.appendChild(
+    createElement('header', {
+      className: 'flex items-center justify-between',
+      children: [
+        createElement('h5', { className: 'text-sm font-semibold uppercase tracking-wide text-slate-500', text: 'Dies setmanals base' }),
+        createBadge(formatDiesSetmanals(calendari.diesSetmanals), 'sky'),
+      ],
+    }),
+  );
+  const diesSeleccionats = new Set(calendari.diesSetmanals || []);
+  const checklist = createElement('div', { className: 'flex flex-wrap gap-3' });
+  WEEKDAY_ORDER.forEach((dia) => {
+    const wrapper = createElement('label', {
+      className: `inline-flex items-center gap-2 rounded-md border px-3 py-1 text-sm transition ${
+        diesSeleccionats.has(dia) ? 'border-emerald-300 bg-emerald-50 text-emerald-700' : 'border-slate-200 bg-white text-slate-700'
+      }`,
+    });
+    const checkbox = createElement('input', {
+      className: 'h-4 w-4 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500',
+      attrs: { type: 'checkbox', value: String(dia) },
+    });
+    checkbox.checked = diesSeleccionats.has(dia);
+    checkbox.addEventListener('change', (event) => {
+      const checked = event.currentTarget.checked;
+      if (checked) {
+        diesSeleccionats.add(dia);
+      } else {
+        diesSeleccionats.delete(dia);
+      }
+      try {
+        const updated = Array.from(diesSeleccionats).sort((a, b) => WEEKDAY_ORDER.indexOf(a) - WEEKDAY_ORDER.indexOf(b));
+        appContext.store.setDiesSetmanals(assignatura.id, updated);
+      } catch (error) {
+        event.currentTarget.checked = !checked;
+        Toast(`Error en actualitzar els dies lectius: ${error.message || error}`, 'error');
+      }
+    });
+    wrapper.append(checkbox, createElement('span', { text: WEEKDAY_LABEL[dia] }));
+    checklist.appendChild(wrapper);
+  });
+  section.appendChild(checklist);
+  section.appendChild(
+    createElement('p', {
+      className: 'text-xs text-slate-500',
+      text: 'Aquest horari base s\'utilitza quan no hi ha cap versió d\'horari específica activa.',
+    }),
+  );
+  return section;
+}
+
+function renderHorariVersionsSection(assignatura, calendari) {
+  const section = createElement('section', {
+    className: 'space-y-4 rounded-lg border border-slate-200 bg-white p-4 shadow-sm',
+  });
+  const activeSchedule = typeof appContext.store.getActiveSchedule === 'function'
+    ? appContext.store.getActiveSchedule(assignatura.id, new Date())
+    : null;
+  const activeVersioId =
+    activeSchedule && typeof activeSchedule.versioId === 'string' && activeSchedule.versioId.trim().length
+      ? activeSchedule.versioId
+      : null;
+  section.appendChild(
+    createElement('header', {
+      className: 'flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between',
+      children: [
+        createElement('h5', { className: 'text-sm font-semibold uppercase tracking-wide text-slate-500', text: "Versions d'horari" }),
+        createBadge(
+          activeVersioId
+            ? `Activa avui: ${activeVersioId}`
+            : 'En ús l\'horari base',
+          activeVersioId ? 'emerald' : 'slate',
+        ),
+      ],
+    }),
+  );
+
+  const versions = calendari.horariVersions || [];
+  if (!versions.length) {
+    section.appendChild(
+      createElement('p', {
+        className: 'text-xs text-slate-500',
+        text: 'Encara no hi ha versions d\'horari. Pots crear-ne una per canviar els dies lectius a partir d\'una data.',
+      }),
+    );
+  } else {
+    const table = createElement('table', { className: 'min-w-full divide-y divide-slate-200 overflow-hidden rounded-md border border-slate-200 text-sm' });
+    const thead = createElement('thead', { className: 'bg-slate-50 text-xs uppercase tracking-wide text-slate-500' });
+    thead.appendChild(
+      createElement('tr', {
         children: [
-          createElement('header', {
-            className: 'flex flex-col gap-1',
-            children: [
-              createElement('h5', {
-                className: 'text-sm font-semibold text-slate-800',
-                text: cal.nom || `Calendari ${cal.id}`,
-              }),
-              createElement('p', {
-                className: 'text-xs text-slate-500',
-                text: cal.assignaturaId ? `Assignatura: ${state.assignatures.byId[cal.assignaturaId]?.nom || cal.assignaturaId}` : 'Calendari global',
-              }),
-            ],
-          }),
-          createElement('p', {
-            className: 'text-xs text-slate-600',
-            text: `Trimestres: ${(cal.trimestres || []).map((t) => `${t.id} (${formatDate(t.tInici)} - ${formatDate(t.tFi)})`).join(', ') || '—'}`,
-          }),
-          createElement('p', {
-            className: 'text-xs text-slate-600',
-            text: `Festius configurats: ${(cal.festius || []).length}`,
-          }),
+          createElement('th', { className: 'px-4 py-2 text-left', text: 'Versió' }),
+          createElement('th', { className: 'px-4 py-2 text-left', text: 'Activa des de' }),
+          createElement('th', { className: 'px-4 py-2 text-left', text: 'Dies' }),
+          createElement('th', { className: 'px-4 py-2 text-left', text: 'Estat' }),
+          createElement('th', { className: 'px-4 py-2 text-right', text: 'Accions' }),
         ],
       }),
     );
+    table.appendChild(thead);
+    const tbody = createElement('tbody', { className: 'divide-y divide-slate-200 bg-white' });
+    versions.forEach((versio, index) => {
+      const row = createElement('tr', {
+        className: activeVersioId === versio.id ? 'bg-emerald-50' : index % 2 === 0 ? 'bg-white' : 'bg-slate-50',
+      });
+      row.append(
+        createElement('td', {
+          className: 'px-4 py-3 font-medium text-slate-700',
+          text: versio.id || `Versió ${index + 1}`,
+        }),
+        createElement('td', {
+          className: 'px-4 py-3 text-slate-600',
+          text: versio.effectiveFrom ? formatDate(versio.effectiveFrom) : '—',
+        }),
+        createElement('td', {
+          className: 'px-4 py-3 text-slate-600',
+          text: formatDiesSetmanals(versio.diesSetmanals),
+        }),
+        createElement('td', {
+          className: 'px-4 py-3 text-slate-600',
+          children: [
+            activeVersioId === versio.id
+              ? createBadge('Activa', 'emerald')
+              : createElement('span', { className: 'text-xs text-slate-500', text: 'Inactiva' }),
+          ],
+        }),
+        createElement('td', {
+          className: 'px-4 py-3 text-right',
+          children: [
+            (() => {
+              const button = createElement('button', {
+                className:
+                  'inline-flex items-center gap-2 rounded-md border border-slate-200 bg-white px-3 py-1 text-xs font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-500',
+                attrs: { type: 'button' },
+                text: 'Activa',
+              });
+              if (activeVersioId === versio.id) {
+                button.disabled = true;
+                button.classList.add('cursor-not-allowed', 'opacity-50');
+              } else {
+                button.addEventListener('click', () => {
+                  try {
+                    appContext.store.activateHorariVersio(assignatura.id, versio.id);
+                    Toast('Versió activada correctament.', 'success');
+                  } catch (error) {
+                    Toast(`No s\'ha pogut activar la versió: ${error.message || error}`, 'error');
+                  }
+                });
+              }
+              return button;
+            })(),
+          ],
+        }),
+      );
+      tbody.appendChild(row);
+    });
+    table.appendChild(tbody);
+    section.appendChild(table);
+  }
+
+  const form = createElement('div', {
+    className: 'space-y-3 rounded-md border border-dashed border-slate-300 bg-slate-50 p-4 text-sm text-slate-600',
   });
-  container.appendChild(list);
+  form.appendChild(createElement('p', { className: 'font-medium text-slate-700', text: 'Nova versió d\'horari' }));
+  const dateInput = createElement('input', {
+    className:
+      'w-full rounded-md border border-slate-300 px-3 py-2 text-sm shadow-sm focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-200',
+    attrs: { type: 'date', value: uiState.calendari.newVersio.effectiveFrom || '' },
+  });
+  const diesSet = uiState.calendari.newVersio.dies instanceof Set
+    ? uiState.calendari.newVersio.dies
+    : new Set(uiState.calendari.newVersio.dies || []);
+  uiState.calendari.newVersio.dies = diesSet;
+  const diesChecklist = createElement('div', { className: 'flex flex-wrap gap-2' });
+  WEEKDAY_ORDER.forEach((dia) => {
+    const label = createElement('label', {
+      className: `inline-flex items-center gap-2 rounded-md border px-2 py-1 text-xs transition ${
+        diesSet.has(dia) ? 'border-emerald-300 bg-emerald-50 text-emerald-700' : 'border-slate-200 bg-white text-slate-600'
+      }`,
+    });
+    const checkbox = createElement('input', {
+      className: 'h-3.5 w-3.5 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500',
+      attrs: { type: 'checkbox', value: String(dia) },
+    });
+    checkbox.checked = diesSet.has(dia);
+    checkbox.addEventListener('change', (event) => {
+      if (event.currentTarget.checked) {
+        diesSet.add(dia);
+      } else {
+        diesSet.delete(dia);
+      }
+    });
+    label.append(checkbox, createElement('span', { text: WEEKDAY_LABEL[dia] }));
+    diesChecklist.appendChild(label);
+  });
+  const errorMsg = createElement('p', {
+    className: 'hidden text-xs font-medium text-rose-600',
+    attrs: { 'aria-live': 'polite' },
+  });
+  const submitBtn = createElement('button', {
+    className:
+      'inline-flex items-center gap-2 rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs font-semibold text-emerald-700 shadow-sm transition hover:bg-emerald-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-500',
+    attrs: { type: 'button' },
+    text: 'Afegeix versió',
+  });
+  submitBtn.addEventListener('click', () => {
+    const effectiveISO = toISODateLocal(dateInput.value);
+    if (!effectiveISO) {
+      errorMsg.textContent = 'Cal indicar la data d\'entrada en vigor.';
+      errorMsg.classList.remove('hidden');
+      return;
+    }
+    const dies = Array.from(diesSet).sort((a, b) => WEEKDAY_ORDER.indexOf(a) - WEEKDAY_ORDER.indexOf(b));
+    if (!dies.length) {
+      errorMsg.textContent = 'La versió ha de contenir com a mínim un dia lectiu.';
+      errorMsg.classList.remove('hidden');
+      return;
+    }
+    errorMsg.classList.add('hidden');
+    try {
+      appContext.store.addHorariVersio(assignatura.id, { effectiveFrom: effectiveISO, diesSetmanals: dies });
+      Toast('Versió creada.', 'success');
+      uiState.calendari.newVersio = { effectiveFrom: '', dies: new Set([1, 2, 3, 4, 5]) };
+      dirtyFlags.view = true;
+      scheduleRender('calendar-versio');
+    } catch (error) {
+      errorMsg.textContent = error.message || 'No s\'ha pogut crear la versió.';
+      errorMsg.classList.remove('hidden');
+    }
+  });
+  form.append(
+    createElement('label', {
+      className: 'flex flex-col gap-2 text-sm font-medium text-slate-700',
+      children: [createElement('span', { text: 'Entrada en vigor' }), dateInput],
+    }),
+    createElement('div', {
+      className: 'space-y-2',
+      children: [createElement('span', { className: 'text-xs font-semibold uppercase text-slate-500', text: 'Dies lectius' }), diesChecklist],
+    }),
+    errorMsg,
+    submitBtn,
+  );
+  section.appendChild(form);
+  return section;
+}
+
+function renderTrimestresSection(assignatura, calendari) {
+  const section = createElement('section', {
+    className: 'space-y-4 rounded-lg border border-slate-200 bg-white p-4 shadow-sm',
+  });
+  section.appendChild(
+    createElement('header', {
+      className: 'flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between',
+      children: [
+        createElement('h5', { className: 'text-sm font-semibold uppercase tracking-wide text-slate-500', text: 'Trimestres' }),
+        createBadge(`${(calendari.trimestres || []).length} trimestres`, 'sky'),
+      ],
+    }),
+  );
+
+  const trimestres = calendari.trimestres || [];
+  if (!trimestres.length) {
+    section.appendChild(
+      createElement('p', {
+        className: 'text-xs text-slate-500',
+        text: 'Encara no s\'ha definit cap trimestre. Afegeix-ne per facilitar els filtres d\'avaluació i exportació.',
+      }),
+    );
+  } else {
+    const table = createElement('table', { className: 'min-w-full divide-y divide-slate-200 overflow-hidden rounded-md border border-slate-200 text-sm' });
+    const thead = createElement('thead', { className: 'bg-slate-50 text-xs uppercase tracking-wide text-slate-500' });
+    thead.appendChild(
+      createElement('tr', {
+        children: [
+          createElement('th', { className: 'px-4 py-2 text-left', text: 'Nom' }),
+          createElement('th', { className: 'px-4 py-2 text-left', text: 'Inici' }),
+          createElement('th', { className: 'px-4 py-2 text-left', text: 'Fi' }),
+          createElement('th', { className: 'px-4 py-2 text-right', text: 'Accions' }),
+        ],
+      }),
+    );
+    table.appendChild(thead);
+    const tbody = createElement('tbody', { className: 'divide-y divide-slate-200 bg-white' });
+    trimestres.forEach((trimestre, index) => {
+      const row = createElement('tr', { className: index % 2 === 0 ? 'bg-white' : 'bg-slate-50' });
+      const startInput = createElement('input', {
+        className:
+          'w-full rounded-md border border-slate-300 px-2 py-1 text-xs shadow-sm focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-200',
+        attrs: { type: 'date', value: trimestre.tInici || '' },
+      });
+      const endInput = createElement('input', {
+        className:
+          'w-full rounded-md border border-slate-300 px-2 py-1 text-xs shadow-sm focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-200',
+        attrs: { type: 'date', value: trimestre.tFi || '' },
+      });
+      const errorMsg = createElement('p', {
+        className: 'hidden text-xs font-medium text-rose-600',
+        attrs: { 'aria-live': 'polite' },
+      });
+
+      const applyChange = (newInici, newFi) => {
+        const message = validateTrimestreRange(trimestres, trimestre.id, newInici, newFi);
+        if (message) {
+          errorMsg.textContent = message;
+          errorMsg.classList.remove('hidden');
+          startInput.value = trimestre.tInici || '';
+          endInput.value = trimestre.tFi || '';
+          return;
+        }
+        errorMsg.classList.add('hidden');
+        try {
+          appContext.store.addTrimestre(assignatura.id, {
+            id: trimestre.id,
+            tInici: newInici,
+            tFi: newFi,
+            nom: trimestre.nom,
+          });
+          Toast('Trimestre actualitzat.', 'success');
+        } catch (error) {
+          errorMsg.textContent = error.message || 'No s\'ha pogut actualitzar el trimestre.';
+          errorMsg.classList.remove('hidden');
+          startInput.value = trimestre.tInici || '';
+          endInput.value = trimestre.tFi || '';
+        }
+      };
+
+      startInput.addEventListener('change', (event) => {
+        const newInici = toISODateLocal(event.currentTarget.value) || '';
+        const newFi = toISODateLocal(endInput.value) || '';
+        if (!newInici) {
+          event.currentTarget.value = trimestre.tInici || '';
+          return;
+        }
+        applyChange(newInici, newFi || trimestre.tFi || '');
+      });
+      endInput.addEventListener('change', (event) => {
+        const newInici = toISODateLocal(startInput.value) || '';
+        const newFi = toISODateLocal(event.currentTarget.value) || '';
+        if (!newFi) {
+          event.currentTarget.value = trimestre.tFi || '';
+          return;
+        }
+        applyChange(newInici || trimestre.tInici || '', newFi);
+      });
+
+      row.append(
+        createElement('td', { className: 'px-4 py-3 font-medium text-slate-700', text: trimestre.nom || trimestre.id }),
+        createElement('td', { className: 'px-4 py-3 text-slate-600', children: [startInput, errorMsg] }),
+        createElement('td', { className: 'px-4 py-3 text-slate-600', children: [endInput] }),
+        createElement('td', {
+          className: 'px-4 py-3 text-right',
+          children: [
+            (() => {
+              const button = createElement('button', {
+                className:
+                  'inline-flex items-center gap-2 rounded-md border border-rose-200 bg-rose-50 px-3 py-1 text-xs font-semibold text-rose-700 shadow-sm transition hover:bg-rose-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-rose-500',
+                attrs: { type: 'button' },
+                children: [createElement('span', { className: 'lucide h-3.5 w-3.5', attrs: { 'data-lucide': 'trash' } }), createElement('span', { text: 'Elimina' })],
+              });
+              button.addEventListener('click', () => {
+                if (!confirm('Vols eliminar aquest trimestre?')) return;
+                try {
+                  appContext.store.removeTrimestre(assignatura.id, trimestre.id);
+                  Toast('Trimestre eliminat.', 'success');
+                } catch (error) {
+                  Toast(`No s\'ha pogut eliminar: ${error.message || error}`, 'error');
+                }
+              });
+              return button;
+            })(),
+          ],
+        }),
+      );
+      tbody.appendChild(row);
+    });
+    table.appendChild(tbody);
+    section.appendChild(table);
+  }
+
+  const form = createElement('div', {
+    className: 'space-y-3 rounded-md border border-dashed border-slate-300 bg-slate-50 p-4 text-sm text-slate-600',
+  });
+  form.appendChild(createElement('p', { className: 'font-medium text-slate-700', text: 'Afegeix trimestre' }));
+  const nomInput = createElement('input', {
+    className:
+      'w-full rounded-md border border-slate-300 px-3 py-2 text-sm shadow-sm focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-200',
+    attrs: { type: 'text', placeholder: 'Nom del trimestre (opcional)' },
+  });
+  const iniciInput = createElement('input', {
+    className:
+      'w-full rounded-md border border-slate-300 px-3 py-2 text-sm shadow-sm focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-200',
+    attrs: { type: 'date', value: uiState.calendari.newTrimestre.tInici || '' },
+  });
+  const fiInput = createElement('input', {
+    className:
+      'w-full rounded-md border border-slate-300 px-3 py-2 text-sm shadow-sm focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-200',
+    attrs: { type: 'date', value: uiState.calendari.newTrimestre.tFi || '' },
+  });
+  const errorMsg = createElement('p', {
+    className: 'hidden text-xs font-medium text-rose-600',
+    attrs: { 'aria-live': 'polite' },
+  });
+
+  iniciInput.addEventListener('change', (event) => {
+    uiState.calendari.newTrimestre.tInici = toISODateLocal(event.currentTarget.value) || '';
+  });
+  fiInput.addEventListener('change', (event) => {
+    uiState.calendari.newTrimestre.tFi = toISODateLocal(event.currentTarget.value) || '';
+  });
+
+  const submitBtn = createElement('button', {
+    className:
+      'inline-flex items-center gap-2 rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs font-semibold text-emerald-700 shadow-sm transition hover:bg-emerald-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-500',
+    attrs: { type: 'button' },
+    text: 'Afegeix',
+  });
+  submitBtn.addEventListener('click', () => {
+    const { tInici, tFi } = uiState.calendari.newTrimestre;
+    const iniciISO = toISODateLocal(tInici) || tInici;
+    const fiISO = toISODateLocal(tFi) || tFi;
+    const message = validateTrimestreRange(trimestres, null, iniciISO, fiISO);
+    if (message) {
+      errorMsg.textContent = message;
+      errorMsg.classList.remove('hidden');
+      return;
+    }
+    if (!iniciISO || !fiISO) {
+      errorMsg.textContent = 'Cal indicar totes dues dates.';
+      errorMsg.classList.remove('hidden');
+      return;
+    }
+    errorMsg.classList.add('hidden');
+    try {
+      appContext.store.addTrimestre(assignatura.id, {
+        tInici: iniciISO,
+        tFi: fiISO,
+        nom: nomInput.value.trim() || undefined,
+      });
+      Toast('Trimestre afegit.', 'success');
+      uiState.calendari.newTrimestre = { tInici: '', tFi: '' };
+      nomInput.value = '';
+      iniciInput.value = '';
+      fiInput.value = '';
+      dirtyFlags.view = true;
+      scheduleRender('calendar-trimestre');
+    } catch (error) {
+      errorMsg.textContent = error.message || 'No s\'ha pogut afegir el trimestre.';
+      errorMsg.classList.remove('hidden');
+    }
+  });
+
+  form.append(
+    createElement('label', { className: 'flex flex-col gap-2 text-sm font-medium text-slate-700', children: [createElement('span', { text: 'Nom' }), nomInput] }),
+    createElement('div', {
+      className: 'grid gap-3 sm:grid-cols-2',
+      children: [
+        createElement('label', { className: 'flex flex-col gap-2 text-sm font-medium text-slate-700', children: [createElement('span', { text: 'Data d\'inici' }), iniciInput] }),
+        createElement('label', { className: 'flex flex-col gap-2 text-sm font-medium text-slate-700', children: [createElement('span', { text: 'Data de fi' }), fiInput] }),
+      ],
+    }),
+    errorMsg,
+    submitBtn,
+  );
+  section.appendChild(form);
+  return section;
+}
+
+function renderCalendariEntriesSection(assignatura, calendari, type) {
+  const isFestius = type === 'festius';
+  const entries = isFestius ? calendari.festius || [] : calendari.excepcions || [];
+  const section = createElement('section', {
+    className: 'space-y-4 rounded-lg border border-slate-200 bg-white p-4 shadow-sm',
+  });
+  section.appendChild(
+    createElement('header', {
+      className: 'flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between',
+      children: [
+        createElement('h5', {
+          className: 'text-sm font-semibold uppercase tracking-wide text-slate-500',
+          text: isFestius ? 'Festius' : 'Excepcions (dies no lectius)',
+        }),
+        createBadge(`${entries.length} registres`, isFestius ? 'amber' : 'rose'),
+      ],
+    }),
+  );
+
+  section.appendChild(createImportExportControls(assignatura, type));
+
+  if (!entries.length) {
+    section.appendChild(
+      createElement('p', {
+        className: 'text-xs text-slate-500',
+        text: isFestius
+          ? 'No hi ha festius registrats. Pots importar-los des d\'un CSV o afegir-los manualment.'
+          : 'No hi ha excepcions puntuals registrades.',
+      }),
+    );
+  } else {
+    const table = createElement('table', { className: 'min-w-full divide-y divide-slate-200 overflow-hidden rounded-md border border-slate-200 text-sm' });
+    const thead = createElement('thead', { className: 'bg-slate-50 text-xs uppercase tracking-wide text-slate-500' });
+    thead.appendChild(
+      createElement('tr', {
+        children: [
+          createElement('th', { className: 'px-4 py-2 text-left', text: 'Data' }),
+          createElement('th', { className: 'px-4 py-2 text-left', text: 'Motiu' }),
+          createElement('th', { className: 'px-4 py-2 text-right', text: 'Accions' }),
+        ],
+      }),
+    );
+    table.appendChild(thead);
+    const tbody = createElement('tbody', { className: 'divide-y divide-slate-200 bg-white' });
+    entries.forEach((item, index) => {
+      const row = createElement('tr', { className: index % 2 === 0 ? 'bg-white' : 'bg-slate-50' });
+      const dateInput = createElement('input', {
+        className:
+          'w-full rounded-md border border-slate-300 px-2 py-1 text-xs shadow-sm focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-200',
+        attrs: { type: 'date', value: item.dataISO || '' },
+      });
+      const motiuInput = createElement('input', {
+        className:
+          'w-full rounded-md border border-slate-300 px-2 py-1 text-xs shadow-sm focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-200',
+        attrs: { type: 'text', value: item.motiu || '', placeholder: 'Motiu (opcional)' },
+      });
+      dateInput.addEventListener('change', (event) => {
+        const newISO = toISODateLocal(event.currentTarget.value);
+        if (!newISO) {
+          event.currentTarget.value = item.dataISO || '';
+          Toast('Introdueix una data vàlida.', 'warn');
+          return;
+        }
+        try {
+          if (isFestius) {
+            appContext.store.removeFestius(assignatura.id, [item.dataISO]);
+            appContext.store.addFestius(assignatura.id, [{ dataISO: newISO, motiu: motiuInput.value }]);
+          } else {
+            appContext.store.removeExcepcio(assignatura.id, item.dataISO);
+            appContext.store.addExcepcions(assignatura.id, [{ dataISO: newISO, motiu: motiuInput.value }]);
+          }
+          Toast('Data actualitzada.', 'success');
+        } catch (error) {
+          Toast(`No s\'ha pogut actualitzar la data: ${error.message || error}`, 'error');
+          event.currentTarget.value = item.dataISO || '';
+        }
+      });
+      motiuInput.addEventListener('change', (event) => {
+        try {
+          const motiu = event.currentTarget.value;
+          if (isFestius) {
+            appContext.store.addFestius(assignatura.id, [{ dataISO: item.dataISO, motiu }]);
+          } else {
+            appContext.store.addExcepcions(assignatura.id, [{ dataISO: item.dataISO, motiu }]);
+          }
+          Toast('Motiu actualitzat.', 'success');
+        } catch (error) {
+          Toast(`No s\'ha pogut actualitzar el motiu: ${error.message || error}`, 'error');
+          event.currentTarget.value = item.motiu || '';
+        }
+      });
+      const removeBtn = createElement('button', {
+        className:
+          'inline-flex items-center gap-2 rounded-md border border-rose-200 bg-rose-50 px-3 py-1 text-xs font-semibold text-rose-700 shadow-sm transition hover:bg-rose-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-rose-500',
+        attrs: { type: 'button' },
+        children: [createElement('span', { className: 'lucide h-3.5 w-3.5', attrs: { 'data-lucide': 'trash-2' } }), createElement('span', { text: 'Elimina' })],
+      });
+      removeBtn.addEventListener('click', () => {
+        if (!confirm('Vols eliminar aquesta entrada?')) return;
+        try {
+          if (isFestius) {
+            appContext.store.removeFestius(assignatura.id, [item.dataISO]);
+          } else {
+            appContext.store.removeExcepcio(assignatura.id, item.dataISO);
+          }
+          Toast('Entrada eliminada.', 'success');
+        } catch (error) {
+          Toast(`No s\'ha pogut eliminar: ${error.message || error}`, 'error');
+        }
+      });
+      row.append(
+        createElement('td', { className: 'px-4 py-3 text-slate-600', children: [dateInput] }),
+        createElement('td', { className: 'px-4 py-3 text-slate-600', children: [motiuInput] }),
+        createElement('td', { className: 'px-4 py-3 text-right', children: [removeBtn] }),
+      );
+      tbody.appendChild(row);
+    });
+    table.appendChild(tbody);
+    section.appendChild(table);
+  }
+
+  const form = createElement('div', {
+    className: 'space-y-3 rounded-md border border-dashed border-slate-300 bg-slate-50 p-4 text-sm text-slate-600',
+  });
+  form.appendChild(
+    createElement('p', {
+      className: 'font-medium text-slate-700',
+      text: isFestius ? 'Afegeix festiu manualment' : 'Afegeix excepció puntual',
+    }),
+  );
+  const dateInput = createElement('input', {
+    className:
+      'w-full rounded-md border border-slate-300 px-3 py-2 text-sm shadow-sm focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-200',
+    attrs: { type: 'date' },
+  });
+  const motiuInput = createElement('input', {
+    className:
+      'w-full rounded-md border border-slate-300 px-3 py-2 text-sm shadow-sm focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-200',
+    attrs: { type: 'text', placeholder: 'Motiu' },
+  });
+  const errorMsg = createElement('p', {
+    className: 'hidden text-xs font-medium text-rose-600',
+    attrs: { 'aria-live': 'polite' },
+  });
+  const submitBtn = createElement('button', {
+    className:
+      'inline-flex items-center gap-2 rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs font-semibold text-emerald-700 shadow-sm transition hover:bg-emerald-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-500',
+    attrs: { type: 'button' },
+    text: 'Afegeix',
+  });
+  submitBtn.addEventListener('click', () => {
+    const dateISO = toISODateLocal(dateInput.value);
+    if (!dateISO) {
+      errorMsg.textContent = 'Cal indicar una data vàlida.';
+      errorMsg.classList.remove('hidden');
+      return;
+    }
+    errorMsg.classList.add('hidden');
+    try {
+      if (isFestius) {
+        appContext.store.addFestius(assignatura.id, [{ dataISO: dateISO, motiu: motiuInput.value }]);
+      } else {
+        appContext.store.addExcepcions(assignatura.id, [{ dataISO: dateISO, motiu: motiuInput.value }]);
+      }
+      Toast('Entrada afegida.', 'success');
+      dateInput.value = '';
+      motiuInput.value = '';
+    } catch (error) {
+      errorMsg.textContent = error.message || 'No s\'ha pogut afegir l\'entrada.';
+      errorMsg.classList.remove('hidden');
+    }
+  });
+
+  form.append(
+    createElement('label', { className: 'flex flex-col gap-2 text-sm font-medium text-slate-700', children: [createElement('span', { text: 'Data' }), dateInput] }),
+    createElement('label', { className: 'flex flex-col gap-2 text-sm font-medium text-slate-700', children: [createElement('span', { text: 'Motiu' }), motiuInput] }),
+    errorMsg,
+    submitBtn,
+  );
+  section.appendChild(form);
+  return section;
+}
+
+function createImportExportControls(assignatura, type) {
+  const wrapper = createElement('div', {
+    className: 'flex flex-col gap-3 rounded-md border border-slate-200 bg-slate-50 p-3 text-sm text-slate-600 sm:flex-row sm:items-end sm:justify-between',
+  });
+  const radioGroup = createElement('div', { className: 'flex items-center gap-3 text-xs text-slate-600' });
+  ['festius', 'excepcions'].forEach((target) => {
+    const id = `import-${target}-${type}`;
+    const label = createElement('label', { className: 'inline-flex items-center gap-2' });
+    const radio = createElement('input', {
+      className: 'h-3.5 w-3.5 border-slate-300 text-emerald-600 focus:ring-emerald-500',
+      attrs: { type: 'radio', name: `import-target-${type}`, id, value: target },
+    });
+    radio.checked = uiState.calendari.importTarget === target;
+    radio.addEventListener('change', () => {
+      uiState.calendari.importTarget = target;
+      if (typeof appContext.actions.setCalendariImportTarget === 'function') {
+        appContext.actions.setCalendariImportTarget(target);
+      }
+    });
+    label.append(radio, createElement('span', { text: target === 'festius' ? 'Festius' : 'Excepcions' }));
+    radioGroup.appendChild(label);
+  });
+
+  const fileInput = createElement('input', {
+    className:
+      'w-full max-w-xs rounded-md border border-slate-300 px-3 py-2 text-sm shadow-sm focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-200',
+    attrs: { type: 'file', accept: '.csv,text/csv' },
+  });
+  const importBtn = createElement('button', {
+    className:
+      'inline-flex items-center gap-2 rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs font-semibold text-emerald-700 shadow-sm transition hover:bg-emerald-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-500',
+    attrs: { type: 'button' },
+    children: [createElement('span', { className: 'lucide h-3.5 w-3.5', attrs: { 'data-lucide': 'file-input' } }), createElement('span', { text: 'Importa CSV' })],
+  });
+  importBtn.addEventListener('click', async () => {
+    const file = fileInput.files?.[0];
+    if (!file) {
+      Toast('Selecciona un fitxer CSV.', 'warn');
+      return;
+    }
+    if (typeof appContext.actions.setCalendariImportTarget === 'function') {
+      appContext.actions.setCalendariImportTarget(uiState.calendari.importTarget);
+    }
+    try {
+      const result = await appContext.actions.importFestiusCSV?.(assignatura.id, file);
+      const tipus = result?.tipus || uiState.calendari.importTarget;
+      Toast(`Importats ${result?.importats || 0} registres a ${tipus}.`, 'success');
+      fileInput.value = '';
+    } catch (error) {
+      Toast(`Error en importar: ${error.message || error}`, 'error');
+    }
+  });
+
+  const exportBtn = createElement('button', {
+    className:
+      'inline-flex items-center gap-2 rounded-md border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900',
+    attrs: { type: 'button' },
+    children: [createElement('span', { className: 'lucide h-3.5 w-3.5', attrs: { 'data-lucide': 'file-down' } }), createElement('span', { text: 'Exporta CSV' })],
+  });
+  exportBtn.addEventListener('click', () => {
+    try {
+      const blob = type === 'festius'
+        ? appContext.actions.exportFestiusCSV?.(assignatura.id)
+        : appContext.actions.exportExcepcionsCSV?.(assignatura.id);
+      if (!blob) {
+        Toast('No hi ha dades per exportar.', 'info');
+        return;
+      }
+      const filename = `${assignatura.nom || assignatura.id}-${type}.csv`;
+      downloadBlob(blob, filename);
+      Toast('Exportació preparada.', 'success');
+    } catch (error) {
+      Toast(`Error en exportar: ${error.message || error}`, 'error');
+    }
+  });
+
+  wrapper.append(radioGroup, fileInput, importBtn, exportBtn);
+  return wrapper;
+}
+
+function renderFestiusSection(assignatura, calendari) {
+  return renderCalendariEntriesSection(assignatura, calendari, 'festius');
+}
+
+function renderExcepcionsSection(assignatura, calendari) {
+  return renderCalendariEntriesSection(assignatura, calendari, 'excepcions');
+}
+
+function renderSimuladorSection(assignatura, calendari) {
+  const section = createElement('section', {
+    className: 'space-y-4 rounded-lg border border-slate-200 bg-white p-4 shadow-sm',
+  });
+  section.appendChild(
+    createElement('header', {
+      className: 'flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between',
+      children: [
+        createElement('h5', { className: 'text-sm font-semibold uppercase tracking-wide text-slate-500', text: 'Simulador “Què passa si…?”' }),
+        createBadge('Consulta lectiva', 'emerald'),
+      ],
+    }),
+  );
+
+  const form = createElement('div', { className: 'flex flex-col gap-3 sm:flex-row sm:items-end' });
+  const dateInput = createElement('input', {
+    className:
+      'w-full rounded-md border border-slate-300 px-3 py-2 text-sm shadow-sm focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-200 sm:w-60',
+    attrs: { type: 'date', value: uiState.calendari.simulatorDate || '' },
+  });
+  const errorMsg = createElement('p', { className: 'hidden text-xs font-medium text-rose-600', attrs: { 'aria-live': 'polite' } });
+  const button = createElement('button', {
+    className:
+      'inline-flex items-center gap-2 rounded-md border border-emerald-200 bg-emerald-50 px-4 py-2 text-sm font-semibold text-emerald-700 shadow-sm transition hover:bg-emerald-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-500',
+    attrs: { type: 'button' },
+    children: [createElement('span', { className: 'lucide h-4 w-4', attrs: { 'data-lucide': 'play' } }), createElement('span', { text: 'Simula' })],
+  });
+  button.addEventListener('click', () => {
+    const iso = toISODateLocal(dateInput.value);
+    if (!iso) {
+      errorMsg.textContent = 'Cal indicar una data vàlida.';
+      errorMsg.classList.remove('hidden');
+      return;
+    }
+    errorMsg.classList.add('hidden');
+    try {
+      const result = appContext.actions.simulate?.(assignatura.id, new Date(`${iso}T00:00:00`)) || {};
+      uiState.calendari.simulatorDate = iso;
+      uiState.calendari.simulatorResult = { ...result, dateISO: iso };
+      dirtyFlags.view = true;
+      scheduleRender('calendar-simulator');
+    } catch (error) {
+      errorMsg.textContent = error.message || 'No s\'ha pogut calcular la simulació.';
+      errorMsg.classList.remove('hidden');
+    }
+  });
+  form.append(
+    createElement('label', { className: 'flex flex-col gap-2 text-sm font-medium text-slate-700', children: [createElement('span', { text: 'Data a simular' }), dateInput] }),
+    button,
+  );
+  section.append(form, errorMsg);
+
+  const resultBox = createElement('div', {
+    className: 'rounded-md border border-dashed border-slate-300 bg-slate-50 p-4 text-sm text-slate-600',
+    attrs: { 'aria-live': 'polite' },
+  });
+  if (!uiState.calendari.simulatorResult) {
+    resultBox.textContent = 'Introdueix una data i prem “Simula” per veure si hi ha classe, la versió d\'horari aplicable i el motiu en cas contrari.';
+  } else {
+    const { lectiu, versioId, motiu, dateISO } = uiState.calendari.simulatorResult;
+    const versio = versioId ? (calendari.horariVersions || []).find((v) => v.id === versioId) : null;
+    if (lectiu) {
+      resultBox.classList.remove('border-dashed', 'border-slate-300', 'bg-slate-50', 'text-slate-600');
+      resultBox.classList.add('border-emerald-200', 'bg-emerald-50', 'text-emerald-700');
+      resultBox.append(
+        createElement('p', { className: 'font-semibold', text: `${formatDate(dateISO)} és lectiu.` }),
+        createElement('p', { className: 'text-sm', text: versio ? `Versió d'horari aplicable: ${versio.id} (${formatDiesSetmanals(versio.diesSetmanals)})` : 'S\'utilitza l\'horari base.' }),
+      );
+    } else {
+      resultBox.classList.remove('border-dashed', 'border-slate-300', 'bg-slate-50', 'text-slate-600');
+      resultBox.classList.add('border-rose-200', 'bg-rose-50', 'text-rose-700');
+      resultBox.append(
+        createElement('p', { className: 'font-semibold', text: `${formatDate(dateISO)} no és lectiu.` }),
+        createElement('p', { className: 'text-sm', text: motiu || 'Motiu desconegut.' }),
+      );
+      if (versioId) {
+        resultBox.append(createElement('p', { className: 'text-xs', text: `Versió prevista: ${versioId}.` }));
+      }
+    }
+  }
+  section.appendChild(resultBox);
+  return section;
+}
+
+function renderICSExportSection(assignatura, calendari, trimestres) {
+  const section = createElement('section', {
+    className: 'space-y-4 rounded-lg border border-slate-200 bg-white p-4 shadow-sm',
+  });
+  section.appendChild(
+    createElement('header', {
+      className: 'flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between',
+      children: [
+        createElement('h5', { className: 'text-sm font-semibold uppercase tracking-wide text-slate-500', text: 'Exporta sessions (ICS)' }),
+        createBadge('Calendari digital', 'sky'),
+      ],
+    }),
+  );
+
+  const form = createElement('div', { className: 'grid gap-3 md:grid-cols-2 lg:grid-cols-4' });
+  const select = createElement('select', {
+    className:
+      'w-full rounded-md border border-slate-300 px-3 py-2 text-sm shadow-sm focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-200',
+  });
+  const hasCursRange = calendari.cursInici && calendari.cursFi;
+  const options = [];
+  if (hasCursRange) {
+    options.push({ value: 'curs', label: 'Període del curs' });
+  }
+  trimestres.forEach((trim) => {
+    options.push({ value: `trimestre:${trim.id}`, label: `${trim.nom} · ${trim.tInici && trim.tFi ? `${formatDate(trim.tInici)} – ${formatDate(trim.tFi)}` : 'Dates pendents'}` });
+  });
+  options.push({ value: 'personalitzat', label: 'Dates personalitzades' });
+  if (!options.some((opt) => opt.value === uiState.calendari.exportMode)) {
+    uiState.calendari.exportMode = options[0]?.value || 'personalitzat';
+  }
+  options.forEach((opt) => {
+    const option = createElement('option', { attrs: { value: opt.value }, text: opt.label });
+    if (opt.value === uiState.calendari.exportMode) option.selected = true;
+    select.appendChild(option);
+  });
+  select.addEventListener('change', (event) => {
+    uiState.calendari.exportMode = event.currentTarget.value;
+    dirtyFlags.view = true;
+    scheduleRender('calendar-export');
+  });
+
+  const fromInput = createElement('input', {
+    className:
+      'w-full rounded-md border border-slate-300 px-3 py-2 text-sm shadow-sm focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-200',
+    attrs: { type: 'date', value: uiState.calendari.exportFrom || '' },
+  });
+  const toInput = createElement('input', {
+    className:
+      'w-full rounded-md border border-slate-300 px-3 py-2 text-sm shadow-sm focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-200',
+    attrs: { type: 'date', value: uiState.calendari.exportTo || '' },
+  });
+  fromInput.addEventListener('change', (event) => {
+    uiState.calendari.exportFrom = toISODateLocal(event.currentTarget.value) || '';
+  });
+  toInput.addEventListener('change', (event) => {
+    uiState.calendari.exportTo = toISODateLocal(event.currentTarget.value) || '';
+  });
+  const isCustom = uiState.calendari.exportMode === 'personalitzat';
+  fromInput.disabled = !isCustom;
+  toInput.disabled = !isCustom;
+
+  const summaryInput = createElement('input', {
+    className:
+      'w-full rounded-md border border-slate-300 px-3 py-2 text-sm shadow-sm focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-200',
+    attrs: { type: 'text', value: uiState.calendari.exportSummary || '', placeholder: 'Títol de l\'esdeveniment' },
+  });
+  summaryInput.addEventListener('input', (event) => {
+    uiState.calendari.exportSummary = event.currentTarget.value;
+  });
+  const locationInput = createElement('input', {
+    className:
+      'w-full rounded-md border border-slate-300 px-3 py-2 text-sm shadow-sm focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-200',
+    attrs: { type: 'text', value: uiState.calendari.exportLocation || '', placeholder: 'Ubicació (opcional)' },
+  });
+  locationInput.addEventListener('input', (event) => {
+    uiState.calendari.exportLocation = event.currentTarget.value;
+  });
+
+  form.append(
+    createElement('label', { className: 'flex flex-col gap-2 text-sm font-medium text-slate-700', children: [createElement('span', { text: 'Rang a exportar' }), select] }),
+    createElement('label', { className: 'flex flex-col gap-2 text-sm font-medium text-slate-700', children: [createElement('span', { text: 'Data inicial' }), fromInput] }),
+    createElement('label', { className: 'flex flex-col gap-2 text-sm font-medium text-slate-700', children: [createElement('span', { text: 'Data final' }), toInput] }),
+    createElement('label', { className: 'flex flex-col gap-2 text-sm font-medium text-slate-700', children: [createElement('span', { text: 'Títol' }), summaryInput] }),
+    createElement('label', { className: 'flex flex-col gap-2 text-sm font-medium text-slate-700', children: [createElement('span', { text: 'Ubicació' }), locationInput] }),
+  );
+  section.appendChild(form);
+
+  const errorMsg = createElement('p', { className: 'hidden text-xs font-medium text-rose-600', attrs: { 'aria-live': 'polite' } });
+  const exportBtn = createElement('button', {
+    className:
+      'inline-flex items-center gap-2 rounded-md border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900',
+    attrs: { type: 'button' },
+    children: [createElement('span', { className: 'lucide h-4 w-4', attrs: { 'data-lucide': 'calendar' } }), createElement('span', { text: 'Exporta ICS' })],
+  });
+  exportBtn.addEventListener('click', () => {
+    let fromISO = null;
+    let toISO = null;
+    if (uiState.calendari.exportMode === 'curs' && hasCursRange) {
+      fromISO = calendari.cursInici;
+      toISO = calendari.cursFi;
+    } else if (uiState.calendari.exportMode.startsWith('trimestre:')) {
+      const id = uiState.calendari.exportMode.split(':')[1];
+      const trimestre = trimestres.find((t) => t.id === id);
+      fromISO = trimestre?.tInici || null;
+      toISO = trimestre?.tFi || null;
+    } else if (uiState.calendari.exportMode === 'personalitzat') {
+      fromISO = uiState.calendari.exportFrom || null;
+      toISO = uiState.calendari.exportTo || null;
+    }
+    if (!fromISO || !toISO) {
+      errorMsg.textContent = 'Cal definir un interval complet per exportar.';
+      errorMsg.classList.remove('hidden');
+      return;
+    }
+    if (toISO < fromISO) {
+      errorMsg.textContent = 'La data final ha de ser posterior o igual a la inicial.';
+      errorMsg.classList.remove('hidden');
+      return;
+    }
+    errorMsg.classList.add('hidden');
+    try {
+      const blob = appContext.actions.exportSessionsICS?.(assignatura.id, {
+        from: fromISO,
+        to: toISO,
+        summary: summaryInput.value || undefined,
+        location: locationInput.value || undefined,
+      });
+      if (!blob) {
+        Toast('No s\'han trobat sessions en el període indicat.', 'info');
+        return;
+      }
+      const filename = `${assignatura.nom || assignatura.id}-${fromISO}-${toISO}.ics`;
+      downloadBlob(blob, filename);
+      Toast('Arxiu ICS generat.', 'success');
+    } catch (error) {
+      errorMsg.textContent = error.message || 'No s\'ha pogut generar l\'ICS.';
+      errorMsg.classList.remove('hidden');
+    }
+  });
+
+  section.append(errorMsg, exportBtn);
+  return section;
+}
+
+function renderCalendariPreview(assignatura, calendari) {
+  const section = createElement('section', {
+    className: 'space-y-4 rounded-lg border border-slate-200 bg-white p-4 shadow-sm',
+  });
+  const baseISO = uiState.calendari.viewMonth || toISODateLocal(new Date());
+  const [yearStr, monthStr] = baseISO.split('-');
+  const baseDate = new Date(Date.UTC(Number(yearStr), Number(monthStr) - 1, 1));
+  const mondayOffset = (baseDate.getUTCDay() + 6) % 7;
+  const start = new Date(baseDate);
+  start.setUTCDate(start.getUTCDate() - mondayOffset);
+  const weeksToRender = 6;
+  const end = new Date(start);
+  end.setUTCDate(end.getUTCDate() + weeksToRender * 7 - 1);
+  const sessions = typeof appContext.store.listSessions === 'function'
+    ? appContext.store.listSessions(assignatura.id, { from: new Date(start), to: new Date(end) })
+    : [];
+  const sessionSet = new Set((sessions || []).map((s) => s.dateISO));
+  const festiuMap = new Map((calendari.festius || []).map((festiu) => [festiu.dataISO, festiu.motiu || 'Festiu']));
+  const excepcioMap = new Map((calendari.excepcions || []).map((ex) => [ex.dataISO, ex.motiu || 'Excepció']));
+
+  const header = createElement('div', { className: 'flex items-center justify-between gap-3' });
+  const formatter = new Intl.DateTimeFormat('ca-ES', { month: 'long', year: 'numeric' });
+  header.appendChild(createElement('h5', { className: 'text-sm font-semibold uppercase tracking-wide text-slate-500', text: `Calendari ${formatter.format(baseDate)}` }));
+  const nav = createElement('div', { className: 'flex items-center gap-2' });
+  const prevBtn = createElement('button', {
+    className:
+      'inline-flex items-center gap-1 rounded-md border border-slate-200 bg-white px-2 py-1 text-xs font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900',
+    attrs: { type: 'button' },
+    children: [createElement('span', { className: 'lucide h-3.5 w-3.5', attrs: { 'data-lucide': 'chevron-left' } }), createElement('span', { text: 'Anterior' })],
+  });
+  prevBtn.addEventListener('click', () => {
+    const prev = new Date(baseDate);
+    prev.setUTCMonth(prev.getUTCMonth() - 1);
+    uiState.calendari.viewMonth = toISODateLocal(prev);
+    dirtyFlags.view = true;
+    scheduleRender('calendar-prev');
+  });
+  const nextBtn = createElement('button', {
+    className:
+      'inline-flex items-center gap-1 rounded-md border border-slate-200 bg-white px-2 py-1 text-xs font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900',
+    attrs: { type: 'button' },
+    children: [createElement('span', { text: 'Següent' }), createElement('span', { className: 'lucide h-3.5 w-3.5', attrs: { 'data-lucide': 'chevron-right' } })],
+  });
+  nextBtn.addEventListener('click', () => {
+    const next = new Date(baseDate);
+    next.setUTCMonth(next.getUTCMonth() + 1);
+    uiState.calendari.viewMonth = toISODateLocal(next);
+    dirtyFlags.view = true;
+    scheduleRender('calendar-next');
+  });
+  nav.append(prevBtn, nextBtn);
+  header.appendChild(nav);
+  section.appendChild(header);
+
+  const table = createElement('table', { className: 'w-full table-fixed border-collapse overflow-hidden rounded-md border border-slate-200 text-sm' });
+  const thead = createElement('thead', { className: 'bg-slate-50 text-xs uppercase tracking-wide text-slate-500' });
+  const headRow = createElement('tr', {});
+  WEEKDAY_ORDER.slice(0, 5).forEach((dia) => {
+    headRow.appendChild(createElement('th', { className: 'px-3 py-2 text-left', text: WEEKDAY_LABEL[dia] }));
+  });
+  thead.appendChild(headRow);
+  table.appendChild(thead);
+
+  const tbody = createElement('tbody', {});
+  const monthIndex = baseDate.getUTCMonth();
+  for (let week = 0; week < weeksToRender; week += 1) {
+    const row = createElement('tr', { className: week % 2 === 0 ? 'bg-white' : 'bg-slate-50' });
+    for (let dayIndex = 0; dayIndex < 5; dayIndex += 1) {
+      const cellDate = new Date(start);
+      cellDate.setUTCDate(start.getUTCDate() + week * 7 + dayIndex);
+      const iso = cellDate.toISOString().slice(0, 10);
+      const isCurrentMonth = cellDate.getUTCMonth() === monthIndex;
+      const festiuMotiu = festiuMap.get(iso) || excepcioMap.get(iso);
+      const isLectiu = sessionSet.has(iso);
+      const cell = createElement('td', {
+        className: `h-24 border border-slate-200 align-top p-2 text-xs ${
+          isLectiu
+            ? 'bg-emerald-50 text-emerald-700'
+            : festiuMotiu
+              ? 'bg-rose-50 text-rose-700'
+              : 'text-slate-600'
+        } ${isCurrentMonth ? '' : 'opacity-60'}`,
+      });
+      cell.appendChild(createElement('div', { className: 'flex items-center justify-between text-xs font-semibold', children: [createElement('span', { text: cellDate.getUTCDate() })] }));
+      if (isLectiu) {
+        cell.appendChild(createElement('p', { className: 'mt-2 text-[11px]', text: 'Lectiu' }));
+      } else if (festiuMotiu) {
+        cell.appendChild(createElement('p', { className: 'mt-2 text-[11px]', text: festiuMotiu }));
+      } else {
+        cell.appendChild(createElement('p', { className: 'mt-2 text-[11px] text-slate-500', text: '—' }));
+      }
+      row.appendChild(cell);
+    }
+    tbody.appendChild(row);
+  }
+  table.appendChild(tbody);
+  section.appendChild(table);
+
+  section.appendChild(
+    createElement('p', {
+      className: 'text-xs text-slate-500',
+      text: 'El calendari mostra únicament de dilluns a divendres. Les sessions lectives apareixen destacades en verd i els dies no lectius en rosa.',
+    }),
+  );
+  return section;
 }
 
 function renderFitxa(container, state) {
@@ -1451,9 +2804,38 @@ function renderFitxa(container, state) {
 
 function renderFitxaDetail(state, alumneId) {
   const wrapper = createElement('div', { className: 'space-y-6' });
+  const assignaturesList = state.assignatures?.allIds?.map((id) => state.assignatures.byId[id]) || [];
+  if (uiState.fitxa.filtreAssignatura !== 'totes' && !assignaturesList.some((a) => a.id === uiState.fitxa.filtreAssignatura)) {
+    uiState.fitxa.filtreAssignatura = 'totes';
+  }
+  const assignaturaFiltreId = uiState.fitxa.filtreAssignatura !== 'totes' ? uiState.fitxa.filtreAssignatura : null;
+  const trimestresDisponibles = assignaturaFiltreId ? getTrimestresForAssignatura(state, assignaturaFiltreId) : [];
+  if (uiState.fitxa.filtrePeriode === 'trimestre' && (!assignaturaFiltreId || !trimestresDisponibles.length)) {
+    uiState.fitxa.filtrePeriode = 'tot';
+    uiState.fitxa.filtreTrimestre = '';
+  }
+  if (
+    uiState.fitxa.filtrePeriode === 'trimestre' &&
+    trimestresDisponibles.length &&
+    !trimestresDisponibles.some((trim) => trim.id === uiState.fitxa.filtreTrimestre)
+  ) {
+    uiState.fitxa.filtreTrimestre = trimestresDisponibles[0].id;
+  }
+
+  const opts = {};
+  if (assignaturaFiltreId) {
+    opts.assignaturaId = assignaturaFiltreId;
+  }
+  if (uiState.fitxa.filtrePeriode === 'trimestre' && uiState.fitxa.filtreTrimestre) {
+    opts.trimestreId = uiState.fitxa.filtreTrimestre;
+  } else if (uiState.fitxa.filtrePeriode === 'rang') {
+    if (uiState.fitxa.rangInici) opts.from = uiState.fitxa.rangInici;
+    if (uiState.fitxa.rangFi) opts.to = uiState.fitxa.rangFi;
+  }
+
   let data = null;
   try {
-    data = appContext.store.getFitxaAlumne(alumneId, {});
+    data = appContext.store.getFitxaAlumne(alumneId, opts);
   } catch (error) {
     return createElement('p', {
       className: 'rounded-md border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700',
@@ -1473,6 +2855,106 @@ function renderFitxaDetail(state, alumneId) {
       ],
     }),
   );
+
+  const filtres = createElement('div', { className: 'grid gap-3 md:grid-cols-3' });
+  const assignaturaSelect = createElement('select', {
+    className:
+      'w-full rounded-md border border-slate-300 px-3 py-2 text-sm shadow-sm focus:border-slate-500 focus:outline-none focus:ring-2 focus:ring-slate-200',
+  });
+  assignaturaSelect.appendChild(createElement('option', { attrs: { value: 'totes' }, text: 'Totes les assignatures' }));
+  assignaturesList.forEach((assignatura) => {
+    const option = createElement('option', { attrs: { value: assignatura.id }, text: assignatura.nom || assignatura.id });
+    if (assignatura.id === assignaturaFiltreId) option.selected = true;
+    assignaturaSelect.appendChild(option);
+  });
+  assignaturaSelect.addEventListener('change', (event) => {
+    uiState.fitxa.filtreAssignatura = event.currentTarget.value || 'totes';
+    if (uiState.fitxa.filtreAssignatura === 'totes') {
+      uiState.fitxa.filtreTrimestre = '';
+      uiState.fitxa.filtrePeriode = 'tot';
+    }
+    dirtyFlags.view = true;
+    scheduleRender('fitxa-filter-assignatura');
+  });
+
+  const periodeSelect = createElement('select', {
+    className:
+      'w-full rounded-md border border-slate-300 px-3 py-2 text-sm shadow-sm focus:border-slate-500 focus:outline-none focus:ring-2 focus:ring-slate-200',
+  });
+  const periodeOptions = [
+    { value: 'tot', text: 'Totes les dates', disabled: false },
+    { value: 'trimestre', text: 'Per trimestre', disabled: !assignaturaFiltreId },
+    { value: 'rang', text: 'Per rang de dates', disabled: false },
+  ];
+  periodeOptions.forEach((optionDef) => {
+    const option = createElement('option', {
+      attrs: { value: optionDef.value, disabled: optionDef.disabled ? 'disabled' : null },
+      text: optionDef.text,
+    });
+    if (optionDef.value === uiState.fitxa.filtrePeriode) option.selected = true;
+    periodeSelect.appendChild(option);
+  });
+  periodeSelect.addEventListener('change', (event) => {
+    const value = event.currentTarget.value;
+    if (value === 'trimestre' && !assignaturaFiltreId && assignaturesList.length) {
+      uiState.fitxa.filtreAssignatura = assignaturesList[0].id;
+    }
+    uiState.fitxa.filtrePeriode = value;
+    dirtyFlags.view = true;
+    scheduleRender('fitxa-filter-periode');
+  });
+
+  filtres.append(
+    createElement('label', { className: 'flex flex-col gap-2 text-sm font-medium text-slate-700', children: [createElement('span', { text: 'Assignatura' }), assignaturaSelect] }),
+    createElement('label', { className: 'flex flex-col gap-2 text-sm font-medium text-slate-700', children: [createElement('span', { text: 'Període' }), periodeSelect] }),
+  );
+
+  if (uiState.fitxa.filtrePeriode === 'trimestre' && assignaturaFiltreId) {
+    const trimestreSelect = createElement('select', {
+      className:
+        'w-full rounded-md border border-slate-300 px-3 py-2 text-sm shadow-sm focus:border-slate-500 focus:outline-none focus:ring-2 focus:ring-slate-200',
+    });
+    trimestresDisponibles.forEach((trim) => {
+      const option = createElement('option', { attrs: { value: trim.id }, text: `${trim.nom} (${formatDate(trim.tInici)} – ${formatDate(trim.tFi)})` });
+      if (trim.id === uiState.fitxa.filtreTrimestre) option.selected = true;
+      trimestreSelect.appendChild(option);
+    });
+    trimestreSelect.addEventListener('change', (event) => {
+      uiState.fitxa.filtreTrimestre = event.currentTarget.value;
+      dirtyFlags.view = true;
+      scheduleRender('fitxa-filter-trimestre');
+    });
+    filtres.appendChild(
+      createElement('label', { className: 'flex flex-col gap-2 text-sm font-medium text-slate-700', children: [createElement('span', { text: 'Trimestre' }), trimestreSelect] }),
+    );
+  } else if (uiState.fitxa.filtrePeriode === 'rang') {
+    const fromInput = createElement('input', {
+      className:
+        'w-full rounded-md border border-slate-300 px-3 py-2 text-sm shadow-sm focus:border-slate-500 focus:outline-none focus:ring-2 focus:ring-slate-200',
+      attrs: { type: 'date', value: uiState.fitxa.rangInici || '' },
+    });
+    fromInput.addEventListener('change', (event) => {
+      uiState.fitxa.rangInici = toISODateLocal(event.currentTarget.value) || '';
+      dirtyFlags.view = true;
+      scheduleRender('fitxa-range');
+    });
+    const toInput = createElement('input', {
+      className:
+        'w-full rounded-md border border-slate-300 px-3 py-2 text-sm shadow-sm focus:border-slate-500 focus:outline-none focus:ring-2 focus:ring-slate-200',
+      attrs: { type: 'date', value: uiState.fitxa.rangFi || '' },
+    });
+    toInput.addEventListener('change', (event) => {
+      uiState.fitxa.rangFi = toISODateLocal(event.currentTarget.value) || '';
+      dirtyFlags.view = true;
+      scheduleRender('fitxa-range');
+    });
+    filtres.append(
+      createElement('label', { className: 'flex flex-col gap-2 text-sm font-medium text-slate-700', children: [createElement('span', { text: 'Des de' }), fromInput] }),
+      createElement('label', { className: 'flex flex-col gap-2 text-sm font-medium text-slate-700', children: [createElement('span', { text: 'Fins a' }), toInput] }),
+    );
+  }
+
+  wrapper.appendChild(filtres);
   const summary = createElement('div', {
     className: 'grid gap-4 sm:grid-cols-2',
   });
@@ -1834,10 +3316,20 @@ function subscribeEvents() {
   events.addEventListener('save:ok', () => {
     updateStatus('emerald', 'Local');
     Toast('Canvis desats correctament.', 'success');
+    if (uiState.calendari.pendingSave) {
+      uiState.calendari.pendingSave = false;
+      dirtyFlags.view = true;
+      scheduleRender('save-ok');
+    }
   });
   events.addEventListener('save:warning', () => {
     updateStatus('amber', 'Avís');
     Toast('S\'ha desat amb advertiments.', 'warn');
+    if (uiState.calendari.pendingSave) {
+      uiState.calendari.pendingSave = false;
+      dirtyFlags.view = true;
+      scheduleRender('save-warning');
+    }
   });
   events.addEventListener('save:error', (event) => {
     updateStatus('rose', 'Error');
@@ -1887,7 +3379,10 @@ function subscribeEvents() {
 function subscribeStore() {
   if (!appContext?.store) return;
   if (unsubscribeStore) unsubscribeStore();
-  unsubscribeStore = appContext.store.subscribe(() => {
+  unsubscribeStore = appContext.store.subscribe((snapshot, change) => {
+    if (change?.action && CALENDAR_MUTATIONS.has(change.action)) {
+      uiState.calendari.pendingSave = true;
+    }
     dirtyFlags.view = true;
     scheduleRender('store');
   });

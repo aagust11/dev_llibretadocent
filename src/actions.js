@@ -44,6 +44,41 @@ const EventTargetCtor = typeof EventTarget === 'function'
 
 export const events = new EventTargetCtor();
 
+const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/u;
+
+function normalizeISO(value) {
+  if (!value && value !== 0) return null;
+  if (typeof value === 'string') {
+    if (ISO_DATE_RE.test(value)) return value;
+    const parsed = new Date(value);
+    if (Number.isNaN(parsed.getTime())) return null;
+    return parsed.toISOString().slice(0, 10);
+  }
+  if (value instanceof Date) {
+    if (Number.isNaN(value.getTime())) return null;
+    return value.toISOString().slice(0, 10);
+  }
+  if (typeof value === 'number') {
+    const parsed = new Date(value);
+    if (Number.isNaN(parsed.getTime())) return null;
+    return parsed.toISOString().slice(0, 10);
+  }
+  return null;
+}
+
+function formatDateForICS(value) {
+  const iso = normalizeISO(value);
+  if (!iso) return null;
+  return iso.replace(/-/gu, '');
+}
+
+function formatTimestampUTC(date = new Date()) {
+  return date
+    .toISOString()
+    .replace(/[-:]/gu, '')
+    .replace(/\.\d{3}Z$/u, 'Z');
+}
+
 function createCSV(rows, { sep = ';' } = {}) {
   return rows
     .map((row) =>
@@ -135,6 +170,7 @@ export function createActions({ store, storage, i18n, utils }) {
   const debounce = utils?.debounce || fallbackDebounce;
   const toCSV = utils?.toCSV || createCSV;
   const numberToComma = utils?.numberToComma;
+  let calendarImportTarget = 'festius';
 
   let saving = false;
   let lastSave = { version: 0, when: null, source: 'idb' };
@@ -161,6 +197,145 @@ export function createActions({ store, storage, i18n, utils }) {
   const debouncedSave = debounce(async () => {
     await saveState({ reason: 'autosave' });
   }, AUTOSAVE_MS);
+
+  function findCalendari(assignaturaId) {
+    const state = store.getState?.();
+    if (!state?.calendaris) return null;
+    return (state.calendaris.allIds || [])
+      .map((id) => state.calendaris.byId[id])
+      .find((cal) => cal.assignaturaId === assignaturaId) || null;
+  }
+
+  function ensureTextFromFile(file) {
+    if (!file) {
+      throw new Error('Cap fitxer proporcionat');
+    }
+    if (typeof file.text === 'function') {
+      return file.text();
+    }
+    if (typeof FileReader === 'function') {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onerror = () => reject(reader.error);
+        reader.onload = () => resolve(reader.result);
+        reader.readAsText(file);
+      });
+    }
+    if (typeof Response === 'function' && typeof Blob === 'function' && file instanceof Blob) {
+      return new Response(file).text();
+    }
+    return Promise.resolve(String(file));
+  }
+
+  function setCalendariImportTarget(target) {
+    if (target === 'festius' || target === 'excepcions') {
+      calendarImportTarget = target;
+    }
+  }
+
+  async function importFestiusCSV(assignaturaId, file) {
+    const text = await ensureTextFromFile(file);
+    const lines = String(text)
+      .split(/\r?\n/u)
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0);
+    const entries = [];
+    for (const line of lines) {
+      const [datePart, ...rest] = line.split(';');
+      const dataISO = normalizeISO(datePart?.trim());
+      if (!dataISO) {
+        if (!entries.length && /data/iu.test(line)) {
+          continue;
+        }
+        throw new Error(`Línia de CSV amb data invàlida: ${line}`);
+      }
+      const motiu = rest.join(';').trim();
+      entries.push({ dataISO, motiu });
+    }
+    if (!entries.length) {
+      return { importats: 0 };
+    }
+    if (calendarImportTarget === 'excepcions') {
+      store.addExcepcions?.(assignaturaId, entries);
+      return { importats: entries.length, tipus: 'excepcions' };
+    }
+    store.addFestius?.(assignaturaId, entries);
+    return { importats: entries.length, tipus: 'festius' };
+  }
+
+  function exportFestiusCSV(assignaturaId) {
+    const calendari = findCalendari(assignaturaId);
+    if (!calendari) {
+      throw new Error('No hi ha calendari configurat per a aquesta assignatura');
+    }
+    const rows = [['Data', 'Motiu']];
+    (calendari.festius || [])
+      .map((festiu) => (typeof festiu === 'string' ? { dataISO: festiu, motiu: '' } : festiu))
+      .map((festiu) => ({ dataISO: normalizeISO(festiu?.dataISO), motiu: festiu?.motiu || '' }))
+      .filter((festiu) => festiu.dataISO)
+      .sort((a, b) => (a.dataISO < b.dataISO ? -1 : a.dataISO > b.dataISO ? 1 : 0))
+      .forEach((festiu) => {
+        rows.push([festiu.dataISO, festiu.motiu]);
+      });
+    const csv = toCSV(rows, { sep: ';' });
+    return new Blob([csv], { type: 'text/csv;charset=utf-8' });
+  }
+
+  function exportExcepcionsCSV(assignaturaId) {
+    const calendari = findCalendari(assignaturaId);
+    if (!calendari) {
+      throw new Error('No hi ha calendari configurat per a aquesta assignatura');
+    }
+    const rows = [['Data', 'Motiu']];
+    (calendari.excepcions || [])
+      .map((item) => ({ dataISO: normalizeISO(item?.dataISO), motiu: item?.motiu || '' }))
+      .filter((item) => item.dataISO)
+      .sort((a, b) => (a.dataISO < b.dataISO ? -1 : a.dataISO > b.dataISO ? 1 : 0))
+      .forEach((item) => {
+        rows.push([item.dataISO, item.motiu]);
+      });
+    const csv = toCSV(rows, { sep: ';' });
+    return new Blob([csv], { type: 'text/csv;charset=utf-8' });
+  }
+
+  function exportSessionsICS(assignaturaId, { from, to, summary, location } = {}) {
+    const state = store.getState?.();
+    if (!state) {
+      throw new Error('No s\'ha pogut obtenir l\'estat actual');
+    }
+    const assignatura = state.assignatures?.byId?.[assignaturaId];
+    if (!assignatura) {
+      throw new Error('Assignatura no trobada');
+    }
+    const sessions = store.listSessions?.(assignaturaId, { from, to }) || [];
+    const lines = [];
+    lines.push('BEGIN:VCALENDAR');
+    lines.push('VERSION:2.0');
+    lines.push('PRODID:-//Llibreta Docent//Calendari//CA');
+    const timestamp = formatTimestampUTC(new Date());
+    sessions.forEach((session) => {
+      const dateValue = formatDateForICS(session.dateISO);
+      if (!dateValue) return;
+      const uid = `${session.dateISO}-${assignaturaId}@llibretadocent.local`;
+      lines.push('BEGIN:VEVENT');
+      lines.push(`UID:${uid}`);
+      lines.push(`DTSTAMP:${timestamp}`);
+      lines.push(`DTSTART;VALUE=DATE:${dateValue}`);
+      const defaultSummary = summary || `${assignatura.nom || assignatura.id} (classe)`;
+      lines.push(`SUMMARY:${defaultSummary}`);
+      if (location) {
+        lines.push(`LOCATION:${String(location)}`);
+      }
+      lines.push('END:VEVENT');
+    });
+    lines.push('END:VCALENDAR');
+    const text = lines.join('\r\n');
+    return new Blob([text], { type: 'text/calendar;charset=utf-8' });
+  }
+
+  function simulate(assignaturaId, date) {
+    return store.simulateDay?.(assignaturaId, date);
+  }
 
   async function applyRemoteState(remote, metaAction = 'fs:refresh') {
     if (!remote || !remote.state) return;
@@ -724,6 +899,12 @@ export function createActions({ store, storage, i18n, utils }) {
     registraAvaluacioNum,
     registraAssistencia,
     registraIncidencia,
+    setCalendariImportTarget,
+    importFestiusCSV,
+    exportFestiusCSV,
+    exportExcepcionsCSV,
+    exportSessionsICS,
+    simulate,
     exportEncrypted,
     exportCSV_AvaluacionsNumeric,
     exportCSV_AvaluacionsCompetencial,
